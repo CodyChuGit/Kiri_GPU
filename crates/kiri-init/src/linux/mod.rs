@@ -1,4 +1,5 @@
 mod agent;
+mod cdi;
 mod cgroup;
 mod container;
 mod devices;

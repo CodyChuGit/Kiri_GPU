@@ -2512,9 +2512,28 @@ impl Engine {
         // Joining a host-network container is the host's namespace too: its
         // net.* sysctls would change the whole VM (or Linux host).
         let joined_host = joined_mode.is_some_and(|m| self.lock_networks().find(&m).is_some_and(|n| n.driver == "host"));
-        let host_opts = match spec.guest_opts(flags & run_flags::NET_HOST != 0 || joined_host) {
+        let mut host_opts = match spec.guest_opts(flags & run_flags::NET_HOST != 0 || joined_host) {
             Ok(o) => o,
             Err(e) => {
+                self.fail_start(&id, &spec, &e);
+                return Err(e);
+            }
+        };
+        // GPUs and other CDI devices, from the host's specs as they are now:
+        // a driver update since the last start moves the libraries.
+        let (env, mounts) = match super::cdi::for_container(&spec.host_opts) {
+            Ok(None) => (std::borrow::Cow::Borrowed(&spec.env), std::borrow::Cow::Borrowed(&spec.mounts)),
+            Ok(Some(cdi)) => {
+                for hook in &cdi.skipped {
+                    crate::diag::warn!("CDI hook not run", id = &id[..12], hook = hook);
+                }
+                host_opts.extend(cdi.opts);
+                let mut mounts = spec.mounts.clone();
+                mounts.extend(cdi.mounts);
+                (std::borrow::Cow::Owned(super::cdi::merge_env(&spec.env, &cdi.env)), std::borrow::Cow::Owned(mounts))
+            }
+            Err(e) => {
+                let e = Error::BadRequest(e);
                 self.fail_start(&id, &spec, &e);
                 return Err(e);
             }
@@ -2530,7 +2549,7 @@ impl Engine {
                 return Err(e);
             }
         };
-        match vm.run(&id, &layers, &argv, &spec.env, &spec.cwd, &spec.user, &hostname, flags, net_args, &spec.mounts, &spec.limits.wire(), spec.caps, &host_opts, &seccomp) {
+        match vm.run(&id, &layers, &argv, &env, &spec.cwd, &spec.user, &hostname, flags, net_args, &mounts, &spec.limits.wire(), spec.caps, &host_opts, &seccomp) {
             Ok(pid) => {
                 if let Some(c) = self.lock().containers.get_mut(&id).filter(|c| c.status == Status::Running) {
                     c.pid = pid;

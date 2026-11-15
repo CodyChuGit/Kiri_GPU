@@ -1590,7 +1590,7 @@ pub(super) fn create(req: &Request, engine: &Engine) -> Result<Value, Error> {
     // refused now with Docker's error rather than at start.
     let host_opts = super::hostopts::from_host(host);
     super::hostopts::guest_lines(&host_opts, network_mode == "host").map_err(Error::BadRequest)?;
-    super::hostopts::check_device_requests(host).map_err(Error::BadRequest)?;
+    super::hostopts::check_device_requests(&host_opts).map_err(Error::BadRequest)?;
     if let Some(s) = body["StopSignal"].as_str().filter(|s| !s.is_empty()) {
         parse_signal(s)?;
     }
@@ -2061,6 +2061,7 @@ fn inspect(c: &Container, nets: &[super::network::Network]) -> Value {
             "Devices": super::hostopts::inspect(&c.spec.host_opts, "Devices"),
             "DeviceCgroupRules": super::hostopts::inspect(&c.spec.host_opts, "DeviceCgroupRules"),
             "GroupAdd": super::hostopts::inspect(&c.spec.host_opts, "GroupAdd"),
+            "DeviceRequests": super::hostopts::inspect(&c.spec.host_opts, "DeviceRequests"),
         },
         "NetworkSettings": network_settings(c, nets),
         "Mounts": c.spec.mount_info,

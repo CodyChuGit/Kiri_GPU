@@ -79,6 +79,18 @@ Apple silicon and Intel Macs (macOS 14+), Windows 10 and 11 (x86-64 and Arm, thr
   (`packaging/linux`): `kiri` with the docker CLI, Compose and buildx, or
   `kiri-lite` for the engine alone. Membership of the `kiri` group is
   root-equivalent, exactly like the `docker` group
+- **GPUs on Linux hosts (CDI)**: `--gpus all`, `--gpus 2`, `--gpus
+  device=0,1`, `--device nvidia.com/gpu=all` and Compose's
+  `deploy.resources.reservations.devices` give a container the devices a
+  [CDI](https://github.com/cncf-tags/container-device-interface) spec in
+  `/etc/cdi` or `/var/run/cdi` lists, read again at every start. For
+  NVIDIA, install the driver and the NVIDIA Container Toolkit, then run
+  `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (again after
+  a driver update); no `nvidia-container-runtime` is needed. There is no
+  runc, so the hooks NVIDIA's spec asks for (library symlinks, the ld.so
+  cache, CUDA forward compatibility, device node permissions) are done by
+  Kiri's agent itself; a spec with any other hook is refused. A GPU in the
+  Mac's VM is not possible
 - **Windows**: the x86-64 Linux build in a WSL2 distro, and `kiri-win.exe`,
   which serves the API on `npipe:////./pipe/kiri` (the `kiri` docker
   context) and carries it into WSL over one `wsl.exe … kiri bridge`, so it
