@@ -1,0 +1,13 @@
+#!/bin/sh
+# `docker compose` against Kiri for the stack in the current directory, plus the
+# raw-GPU override when the stack opts into it (a file named `gpu-raw` next to
+# compose.yaml) and /box/config/kiri/gpu-raw.override.yaml exists. Native CDI
+# stacks (deploy.resources.reservations.devices) need neither.
+set -eu
+export DOCKER_HOST=${DOCKER_HOST:-unix:///run/kiri/docker.sock}
+if [ -e gpu-raw ]; then
+  o=${GPU_RAW_OVERRIDE:-/box/config/kiri/gpu-raw.override.yaml}
+  [ -r "$o" ] || { echo "kiri-compose: $PWD/gpu-raw is set but $o is missing (run: gpu-raw.sh compose app > $o)" >&2; exit 1; }
+  exec docker compose -f compose.yaml -f "$o" "$@"
+fi
+exec docker compose -f compose.yaml "$@"
