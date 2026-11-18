@@ -1,0 +1,4 @@
+# Per-box secrets and generated files never go in git.
+.env
+gpu-raw.override.yaml
+tools/box-probe/target/
