@@ -151,6 +151,23 @@ $D restart -t 20 "$N" >/dev/null; up
 if $D logs "$N" 2>&1 | grep -q 'stopped unexpectedly'; then FAIL=$((FAIL + 1)); echo "  FAIL clean-stop-not-error: $($D logs "$N" 2>&1 | grep 'stopped unexpectedly' | head -1)"; else PASS=$((PASS + 1)); fi
 t start-after-service-restart "true" "docker start cs >/dev/null && docker inspect -f '{{.State.Running}}' cs"
 t clean-stop-cleanup "cs" "docker rm -f cs"
+# GPUs through CDI (--gpus, --device vendor/class=name, Compose), with a
+# fake NVIDIA spec: device nodes with NVIDIA's major number, a libcuda with
+# its soname, and the hooks nvidia-ctk writes. A real GPU is checked by hand.
+t cdi-setup "ok" "mkdir -p /etc/cdi /opt/fakedrv && mknod -m 666 /dev/nvidia0 c 195 0 && mknod -m 666 /dev/nvidia1 c 195 1 && mknod -m 666 /dev/nvidiactl c 195 255 && apk add -q gcc musl-dev >/dev/null 2>&1 && echo 'int cuInit(int f){return 0;}' > /tmp/c.c && cc -shared -fPIC -Wl,-soname,libcuda.so.1 -o /opt/fakedrv/libcuda.so.580.95.05 /tmp/c.c && printf '#!/bin/sh\necho fake-smi\n' > /opt/fakedrv/nvidia-smi && chmod +x /opt/fakedrv/nvidia-smi && printf '%s\n' 'cdiVersion: 0.5.0' 'kind: nvidia.com/gpu' 'containerEdits:' '  deviceNodes:' '  - path: /dev/nvidiactl' '  env:' '  - NVIDIA_VISIBLE_DEVICES=void' '  hooks:' '  - hookName: createContainer' '    path: /usr/bin/nvidia-cdi-hook' '    args: [nvidia-cdi-hook, create-symlinks, --link, libcuda.so.1::/usr/lib/x86_64-linux-gnu/libcuda.so]' '  - hookName: createContainer' '    path: /usr/bin/nvidia-cdi-hook' '    args: [nvidia-cdi-hook, update-ldcache, --folder, /usr/lib/x86_64-linux-gnu]' '  mounts:' '  - hostPath: /opt/fakedrv/libcuda.so.580.95.05' '    containerPath: /usr/lib/x86_64-linux-gnu/libcuda.so.580.95.05' '    options: [ro, nosuid, nodev, rbind, rprivate]' '  - hostPath: /opt/fakedrv/nvidia-smi' '    containerPath: /usr/bin/nvidia-smi' '    options: [ro, nosuid, nodev, rbind, rprivate]' 'devices:' '- name: \"0\"' '  containerEdits:' '    deviceNodes:' '    - path: /dev/nvidia0' '- name: \"1\"' '  containerEdits:' '    deviceNodes:' '    - path: /dev/nvidia1' '- name: all' '  containerEdits:' '    deviceNodes:' '    - path: /dev/nvidia0' '    - path: /dev/nvidia1' > /etc/cdi/nvidia.yaml && echo ok"
+t cdi-gpus-all "/dev/nvidia0 /dev/nvidia1 /dev/nvidiactl fake-smi void" "docker run --rm --gpus all alpine sh -c 'echo \$(ls /dev/nvidia*) \$(nvidia-smi) \$NVIDIA_VISIBLE_DEVICES'"
+t cdi-gpus-one "/dev/nvidia0 /dev/nvidiactl" "docker run --rm --gpus 1 alpine sh -c 'echo \$(ls /dev/nvidia*)'"
+t cdi-gpus-device "/dev/nvidia1 /dev/nvidiactl" "docker run --rm --gpus device=1 alpine sh -c 'echo \$(ls /dev/nvidia*)'"
+t cdi-device-name "/dev/nvidia0 /dev/nvidiactl" "docker run --rm --device nvidia.com/gpu=0 alpine sh -c 'echo \$(ls /dev/nvidia*)'"
+# The device cgroup lets the GPU's nodes through (the kernel then says
+# there is no such device), and no other container's.
+t cdi-cgroup "No such device or address" "docker run --rm --gpus all alpine head -c1 /dev/nvidia0"
+t cdi-cgroup-without "Operation not permitted" "docker run --rm alpine sh -c 'mknod /tmp/n c 195 0 && head -c1 /tmp/n'"
+t cdi-hooks "libcuda.so -> libcuda.so.1 libcuda.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcuda.so.1" "docker run --rm --gpus all ubuntu:24.04 sh -c 'echo \$(ls -l /usr/lib/x86_64-linux-gnu/libcuda.so | grep -o \"libcuda.so -> .*\") \$(ldconfig -p | grep libcuda.so.1)'"
+t cdi-inspect '"Count":-1' "docker create --name cdi-i --gpus all alpine true >/dev/null && docker inspect -f '{{json .HostConfig.DeviceRequests}}' cdi-i; docker rm cdi-i >/dev/null"
+t cdi-too-many "could not select 3 GPUs" "docker run --rm --gpus 3 alpine true"
+t cdi-unknown "unresolvable CDI devices nvidia.com/gpu=7" "docker run --rm --device nvidia.com/gpu=7 alpine true"
+t cdi-cleanup "gone" "rm -rf /etc/cdi /opt/fakedrv /dev/nvidia0 /dev/nvidia1 /dev/nvidiactl && docker run --rm --gpus all alpine true 2>&1 | grep -q 'no CDI specs' && echo gone"
 # The VM (here the agent, kiri-init under the daemon) dies with nobody asking
 # (#50): `always` and `unless-stopped` come back by themselves, with no
 # request to boot a new one; no policy, or a `docker stop`, stays down.

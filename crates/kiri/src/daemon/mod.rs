@@ -15,6 +15,7 @@ mod engine;
 mod filters;
 mod health;
 mod hostetc;
+mod cdi;
 mod hostopts;
 mod mirror;
 mod http;
@@ -36,6 +37,7 @@ mod vmlink;
 mod volumes;
 #[cfg(target_os = "macos")]
 mod watch;
+mod yaml;
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;

@@ -1,13 +1,14 @@
 //! HostConfig settings the guest applies when a container starts:
 //! `--ulimit`, `--sysctl`, `--device`, `--device-cgroup-rule` and
-//! `--group-add`. They are kept as the API gave them (for inspect), checked
+//! `--group-add`, and the GPUs and CDI devices `--gpus` and `--device
+//! vendor.com/class=name` ask for (see [`super::cdi`]). They are kept as the API gave them (for inspect), checked
 //! at create with Docker's errors, and handed to the guest at every start as
 //! the `opts` lines of `Run` and `Exec` (see [`kiri_proto::RunSpec::opts`]).
 
 use serde_json::{Value, json};
 
 /// The HostConfig keys kept with a container.
-const KEYS: [&str; 5] = ["Ulimits", "Sysctls", "Devices", "DeviceCgroupRules", "GroupAdd"];
+const KEYS: [&str; 6] = ["Ulimits", "Sysctls", "Devices", "DeviceCgroupRules", "GroupAdd", "DeviceRequests"];
 
 /// `nofile` when the run sets none: what containers get on Docker Desktop
 /// and on Docker Engine under containerd's `LimitNOFILE=infinity`. Without
@@ -58,16 +59,13 @@ pub fn inspect(opts: &Value, key: &str) -> Value {
     }
 }
 
-/// `--gpus` and Compose `deploy.resources.reservations.devices` arrive as
-/// DeviceRequests. Kiri has no GPU to give, and saying so beats a container
-/// that silently runs on the CPU.
-pub fn check_device_requests(host: &Value) -> Result<(), String> {
-    let Some(r) = host["DeviceRequests"].as_array().and_then(|a| a.first()) else { return Ok(()) };
-    let caps = r["Capabilities"].as_array().map(|c| c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-    Err(format!(
-        "could not select device driver {:?} with capabilities: [{caps}]: Kiri does not support GPUs or other device requests",
-        r["Driver"].as_str().unwrap_or("")
-    ))
+/// `--gpus`, `--device vendor.com/class=name` and Compose's
+/// `deploy.resources.reservations.devices`: checked at create against the
+/// host's CDI specs, so a missing GPU fails `docker run` rather than
+/// leaving a container that silently runs on the CPU. `opts` as
+/// [`from_host`] keeps them.
+pub fn check_device_requests(opts: &Value) -> Result<(), String> {
+    super::cdi::for_container(opts).map(|_| ())
 }
 
 /// The guest's lines for `opts` (from [`from_host`]), or Docker's error for
@@ -106,6 +104,10 @@ pub fn guest_lines(opts: &Value, net_host: bool) -> Result<Vec<String>, String> 
     }
     for d in opts["Devices"].as_array().into_iter().flatten() {
         let host = d["PathOnHost"].as_str().unwrap_or("");
+        // `--device nvidia.com/gpu=0`: a CDI device, resolved at start.
+        if super::cdi::is_qualified(host) {
+            continue;
+        }
         let container = d["PathInContainer"].as_str().filter(|p| !p.is_empty()).unwrap_or(host);
         let perms = d["CgroupPermissions"].as_str().filter(|p| !p.is_empty()).unwrap_or("rwm");
         for p in [host, container] {
@@ -291,11 +293,19 @@ mod tests {
     }
 
     #[test]
-    fn device_requests_are_refused() {
+    fn device_requests_no_driver_takes_are_refused() {
         assert!(check_device_requests(&json!({})).is_ok());
         assert!(check_device_requests(&json!({"DeviceRequests": []})).is_ok());
-        let e = check_device_requests(&json!({"DeviceRequests": [{"Driver": "", "Count": -1, "Capabilities": [["gpu"]]}]})).unwrap_err();
-        assert!(e.starts_with("could not select device driver \"\" with capabilities: [[\"gpu\"]]"), "{e}");
+        let e = check_device_requests(&json!({"DeviceRequests": [{"Driver": "", "Count": -1, "Capabilities": [["tpu"]]}]})).unwrap_err();
+        assert!(e.starts_with("could not select device driver \"\" with capabilities: [[\"tpu\"]]"), "{e}");
+    }
+
+    #[test]
+    fn cdi_devices_are_not_device_paths() {
+        let opts = json!({"Devices": [{"PathOnHost": "nvidia.com/gpu=all", "PathInContainer": "nvidia.com/gpu=all", "CgroupPermissions": "rwm"}]});
+        assert_eq!(guest_lines(&opts, false).unwrap(), ["rlimit\t7\t1048576\t1048576"]);
+        let kept = from_host(&json!({"DeviceRequests": [{"Driver": "", "Count": -1, "Capabilities": [["gpu"]]}]}));
+        assert_eq!(kept["DeviceRequests"][0]["Count"], -1);
     }
 
     #[test]

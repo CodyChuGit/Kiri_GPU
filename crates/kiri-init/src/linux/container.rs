@@ -177,6 +177,7 @@ struct HostApplied {
     rlimits: Vec<(u32, u64, u64)>,
     groups: Vec<String>,
     nodes: Vec<super::hostopts::Node>,
+    cdi: super::cdi::Cdi,
 }
 
 /// Docker's default capability set as a mask.
@@ -322,12 +323,22 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
         netns = netns_inode(&joined);
         prepared.net_join = Some(joined);
     }
-    prepared.host = HostApplied { rlimits: host.rlimits.clone(), groups: host.groups.clone(), nodes };
+    prepared.host = HostApplied { rlimits: host.rlimits.clone(), groups: host.groups.clone(), nodes, cdi: host.cdi.clone() };
     // Small, short-lived files: kept in memory (/run is tmpfs), not on the data disk.
     let etc_dir = PathBuf::from("/run/kiri").join(spec.id);
     let embedded_dns = embedded_dns(spec, net.upstream_dns, net.dns.relay);
     let nameserver = embedded_dns.then(|| embedded_address(spec, net.dns.relay));
     prepared.etc_files = write_etc_files(spec, &etc_dir, net.upstream_dns, nameserver).map_err(cleanup)?;
+    // CDI's disable-device-node-modification: the driver reads its
+    // parameters here, and with ModifyDeviceFiles 0 it leaves the
+    // container's device nodes as they were given.
+    if host.cdi.no_modify
+        && let Some(text) = fs::read_to_string("/proc/driver/nvidia/params").ok().as_deref().and_then(super::cdi::nvidia_params)
+    {
+        let src = etc_dir.join("nvidia-params");
+        fs::write(&src, text).map_err(cleanup)?;
+        prepared.etc_files.push((sys::cstr(&src).map_err(cleanup)?, CString::new("proc/driver/nvidia/params").expect("no NUL")));
+    }
     prepared.mounts = parse_mounts(spec.mounts).map_err(cleanup)?;
     // A network namespace of its own gets Docker's two defaults: any port
     // and ping without root. Host networking, and `--network container:`
@@ -599,7 +610,7 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile
     let mut prepared = prepare(spec.argv, spec.env, spec.cwd, spec.user, None, spec.flags, spec.caps)?;
     // The container's ulimits and groups apply to its execs too, as with runc.
     let host = super::hostopts::parse(spec.opts)?;
-    prepared.host = HostApplied { rlimits: host.rlimits, groups: host.groups, nodes: Vec::new() };
+    prepared.host = HostApplied { rlimits: host.rlimits, groups: host.groups, nodes: Vec::new(), cdi: Default::default() };
     // An exec runs under its container's profile, not the default.
     prepared.profile = profile.to_vec();
     let (parent_io, child_io) = stdio(&prepared)?;
@@ -1310,6 +1321,10 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     unsafe {
         libc::umount2(c".".as_ptr(), libc::MNT_DETACH);
         libc::chdir(c"/".as_ptr());
+    }
+    // CDI hooks' work, inside the container and before a read-only root.
+    if !p.host.cdi.is_empty() {
+        super::cdi::apply(&p.host.cdi).unwrap_or_else(|e| fail("cdi", e));
     }
     // Docker creates a missing working directory (mkdir -p) as root, 0755,
     // before it switches user and before the root goes read-only, so both

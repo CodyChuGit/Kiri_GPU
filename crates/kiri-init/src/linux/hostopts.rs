@@ -1,6 +1,7 @@
 //! HostConfig settings applied when a container starts, from the `opts`
 //! lines of `Run` and `Exec`: resource limits (`--ulimit`), sysctls,
-//! devices and device rules, and supplementary groups (`--group-add`). The
+//! devices and device rules, supplementary groups (`--group-add`), and
+//! what CDI hooks ask for (`cdi`, see [`super::cdi`]). The
 //! daemon has checked them already; this side refuses anything malformed
 //! rather than trusting it.
 
@@ -62,6 +63,8 @@ pub struct HostOpts {
     pub rules: Vec<Rule>,
     /// `--group-add`: names (looked up in the container's /etc/group) or ids.
     pub groups: Vec<String>,
+    /// What CDI specs' hooks ask for (`cdi` lines).
+    pub cdi: super::cdi::Cdi,
 }
 
 fn bad(line: &str) -> io::Error {
@@ -110,6 +113,7 @@ pub fn parse(list: StrList<'_>) -> io::Result<HostOpts> {
             }
             ["devrule", kind, major, minor, perms] => o.rules.push(devices::parse_rule(kind, major, minor, perms).ok_or_else(|| bad(line))?),
             ["group", g] if !g.is_empty() => o.groups.push((*g).to_owned()),
+            ["cdi", rest @ ..] => o.cdi.add(rest).ok_or_else(|| bad(line))?,
             _ => return Err(bad(line)),
         }
     }
