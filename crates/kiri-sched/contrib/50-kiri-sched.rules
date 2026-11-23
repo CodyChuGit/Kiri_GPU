@@ -1,0 +1,13 @@
+// Lets the kiri-sched user start and stop kiri-run@ units, and nothing else.
+// Install: /etc/polkit-1/rules.d/50-kiri-sched.rules
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "kiri-sched") {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        if (unit && /^kiri-run@[a-z0-9_-]+\.service$/.test(unit) &&
+            (verb == "start" || verb == "stop")) {
+            return polkit.Result.YES;
+        }
+    }
+});

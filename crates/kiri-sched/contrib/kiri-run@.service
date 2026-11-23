@@ -1,0 +1,25 @@
+# One Kiri stack, started and stopped by kiri-sched:
+#   /box/config/kiri/stacks/<name>/compose.yaml
+# Unlike kiri-stack@ (which converges a stack at boot and leaves it running
+# when stopped), stopping this unit really stops the stack, which is what a
+# GPU switch needs. Never enable it: the scheduler decides what runs.
+#
+# In GPU stacks set `restart: "no"` on every service: restarts are the
+# scheduler's job, and Kiri refuses a GPU start the scheduler did not grant.
+[Unit]
+Description=Kiri stack %i (run by kiri-sched)
+Requires=kiri.service
+After=kiri.service box-cdi-refresh.service
+RequiresMountsFor=/box /models
+ConditionPathExists=/box/config/kiri/stacks/%i/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/box/config/kiri/stacks/%i
+Environment=DOCKER_HOST=unix:///run/kiri/docker.sock
+Environment=COMPOSE_PROJECT_NAME=%i
+ExecStart=/opt/box/bin/kiri-compose up --detach --remove-orphans
+ExecStop=/opt/box/bin/kiri-compose down --timeout 60
+TimeoutStartSec=180
+TimeoutStopSec=90
