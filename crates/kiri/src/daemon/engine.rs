@@ -2526,6 +2526,14 @@ impl Engine {
                 return Err(e);
             }
         };
+        // GPUs go only to the runtime the GPU scheduler says holds them
+        // (when this host has one): see `gpulease`.
+        let gpus = super::cdi::wanted(&spec.host_opts).map(|w| super::gpulease::gpus(&w)).unwrap_or_default();
+        if let Err(reason) = super::gpulease::check(&id, &spec.labels, &gpus) {
+            let e = Error::Conflict(reason);
+            self.fail_start(&id, &spec, &e);
+            return Err(e);
+        }
         // GPUs and other CDI devices, from the host's specs as they are now:
         // a driver update since the last start moves the libraries.
         let (env, mounts) = match super::cdi::for_container(&spec.host_opts) {
