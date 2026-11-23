@@ -388,6 +388,9 @@ pub mod run_flags {
     /// program as its child, forwards signals to it, reaps orphans and exits
     /// with the program's status, as tini does for Docker.
     pub const INIT: u32 = 1 << 16;
+    /// `--ipc host`: share the host's IPC namespace and its /dev/shm, as
+    /// PyTorch and NCCL want for several GPUs in one container.
+    pub const IPC_HOST: u32 = 1 << 17;
 }
 
 /// A container's network, as `Run` carries it.

@@ -161,6 +161,8 @@ struct Prepared {
     no_new_privs: bool,
     readonly_rootfs: bool,
     shm_size: u64,
+    /// `--ipc host`: no IPC namespace of its own, and the host's /dev/shm.
+    ipc_host: bool,
     /// `--init`: PID 1 supervises the program instead of being it.
     init: bool,
     /// Ulimits, groups and device nodes from the `opts` lines.
@@ -363,9 +365,10 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     let (parent_io, child_io) = stdio(&prepared).map_err(cleanup)?;
     let rootfs_c = sys::cstr(&rootfs).map_err(cleanup)?;
 
-    let mut flags = (libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC | libc::CLONE_NEWCGROUP)
-        as u64
-        | CLONE_INTO_CGROUP;
+    let mut flags = (libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWCGROUP) as u64 | CLONE_INTO_CGROUP;
+    if !prepared.ipc_host {
+        flags |= libc::CLONE_NEWIPC as u64;
+    }
     if spec.flags & run_flags::NET_HOST == 0 && prepared.net_join.is_none() {
         flags |= libc::CLONE_NEWNET as u64;
     }
@@ -903,6 +906,7 @@ fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname:
         no_new_privs: flags & run_flags::NO_NEW_PRIVS != 0,
         readonly_rootfs: flags & run_flags::READONLY_ROOTFS != 0,
         shm_size: 64 << 20,
+        ipc_host: flags & run_flags::IPC_HOST != 0,
         init: flags & run_flags::INIT != 0,
         host: HostApplied::default(),
         root_ready: None,
@@ -1298,7 +1302,7 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     }
     let root = inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
     let root = root.as_fd();
-    mount_container_filesystems(p.privileged, p.shm_size).unwrap_or_else(|e| fail("mount", e));
+    mount_container_filesystems(p.privileged, p.shm_size, p.ipc_host).unwrap_or_else(|e| fail("mount", e));
     super::hostopts::make_nodes(root, &p.host.nodes).unwrap_or_else(|e| fail("devices", e));
     for (src, target) in &p.etc_files {
         bind_file(root, src, target).unwrap_or_else(|e| fail(&target.to_string_lossy(), e));
@@ -1538,7 +1542,7 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
 /// /dev/pts, /dev/shm, /dev/mqueue and a read-only cgroup view. Relative
 /// paths: the current directory is the container root. A privileged
 /// container gets the VM's devices and writable /sys and cgroups instead.
-fn mount_container_filesystems(privileged: bool, shm_size: u64) -> io::Result<()> {
+fn mount_container_filesystems(privileged: bool, shm_size: u64, ipc_host: bool) -> io::Result<()> {
     let nosuid_nodev_noexec = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
     let ro = if privileged { 0 } else { libc::MS_RDONLY };
     for d in [c"proc", c"sys", c"dev"] {
@@ -1597,8 +1601,14 @@ fn mount_container_filesystems(privileged: bool, shm_size: u64) -> io::Result<()
         sys::mkdir(d, 0o755);
     }
     sys::mount(c"devpts", c"dev/pts", c"devpts", libc::MS_NOSUID | libc::MS_NOEXEC, Some(c"newinstance,ptmxmode=0666,mode=0620,gid=5"))?;
-    let shm = CString::new(format!("mode=1777,size={}k", shm_size.div_ceil(1024))).expect("no NUL");
-    sys::mount(c"shm", c"dev/shm", c"tmpfs", nosuid_nodev_noexec, Some(&shm))?;
+    if ipc_host {
+        // The host's own /dev/shm (the root is still the host's here), so
+        // shared memory segments and their files are the same on both sides.
+        sys::mount(c"/dev/shm", c"dev/shm", c"", libc::MS_BIND | libc::MS_REC, None)?;
+    } else {
+        let shm = CString::new(format!("mode=1777,size={}k", shm_size.div_ceil(1024))).expect("no NUL");
+        sys::mount(c"shm", c"dev/shm", c"tmpfs", nosuid_nodev_noexec, Some(&shm))?;
+    }
     sys::mount(c"mqueue", c"dev/mqueue", c"mqueue", nosuid_nodev_noexec, None)?;
     sys::mkdir(c"sys/fs/cgroup", 0o755);
     sys::mount(c"cgroup2", c"sys/fs/cgroup", c"cgroup2", nosuid_nodev_noexec | ro, None)?;

@@ -1660,6 +1660,7 @@ pub(super) fn create(req: &Request, engine: &Engine) -> Result<Value, Error> {
         healthcheck,
         shell: strings(&body["Shell"]).filter(|s| !s.is_empty()).or_else(|| strings(&image_cfg["config"]["Shell"])).unwrap_or_default(),
         init: host["Init"].as_bool(),
+        ipc_mode: ipc_mode(&host["IpcMode"]).map_err(Error::BadRequest)?,
         extra_networks,
         log_config: super::logfile::LogConfig::from_host(&host["LogConfig"]).map_err(Error::BadRequest)?,
         network_mode,
@@ -1700,6 +1701,19 @@ pub(super) fn create(req: &Request, engine: &Engine) -> Result<Value, Error> {
     }
     let id = engine.create(req.query("name").map(str::to_owned), spec, &image)?;
     Ok(json!({"Id": id, "Warnings": warnings}))
+}
+
+/// `--ipc` as kept: `host`, or empty for a private namespace (Docker's
+/// `private`, `shareable` and `none` all get one of their own here). Joining
+/// another container's (`container:<name>`) is refused rather than quietly
+/// given a private one.
+fn ipc_mode(v: &Value) -> Result<String, String> {
+    match v.as_str().unwrap_or("") {
+        "host" => Ok("host".into()),
+        "" | "private" | "shareable" | "none" => Ok(String::new()),
+        m if m.starts_with("container:") => Err(format!("ipc mode {m}: joining another container's IPC namespace is not supported")),
+        m => Err(format!("invalid IPC mode: {m}")),
+    }
 }
 
 /// `--network container:<target>`: Docker's checks, then the mode as it is
@@ -1930,6 +1944,7 @@ fn container_inspect(engine: &Engine, key: &str) -> Result<Value, Error> {
         if let Some(init) = c.spec.init {
             v["HostConfig"]["Init"] = init.into();
         }
+        v["HostConfig"]["IpcMode"] = if c.spec.ipc_mode.is_empty() { "private" } else { c.spec.ipc_mode.as_str() }.into();
         v
     })
 }
@@ -3211,6 +3226,11 @@ mod network_option_tests {
     #[test]
     fn container_network_mode_refuses_what_docker_refuses() {
         assert!(container_mode_allowed(&json!({"HostConfig": {"NetworkMode": "container:web"}}), "web").is_ok());
+        assert_eq!(ipc_mode(&json!("host")).unwrap(), "host");
+        assert_eq!(ipc_mode(&json!(null)).unwrap(), "");
+        assert_eq!(ipc_mode(&json!("shareable")).unwrap(), "");
+        assert!(ipc_mode(&json!("container:web")).is_err());
+        assert!(ipc_mode(&json!("bogus")).is_err());
         // inspect reports the bindings asked for, as Docker does.
         let b = |container_port, proto: &str, host_ip: &str, host_port| super::super::ports::Binding { container_port, proto: proto.into(), host_ip: host_ip.into(), host_port };
         let ports = [b(80, "tcp", "", 8080), b(80, "tcp", "127.0.0.1", 0), b(53, "udp", "", 5353)];
