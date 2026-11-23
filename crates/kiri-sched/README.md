@@ -62,11 +62,19 @@ kiri-sched reset                   # after a fault, once the GPUs were checked
 kiri-sched hash-token < token      # for [[client]] token_sha256
 ```
 
-`GET /box/status`, `GET /box/events` (server-sent events) and `GET /v1/models`
-(every model with its runtime's state) are open to every client; the
-`POST /box/*` actions need an `admin` client or the admin socket.
+Every request needs a client token (`Authorization: Bearer …` or
+`x-api-key`). With one, `GET /box/status`, `GET /box/events` (server-sent
+events) and `GET /v1/models` (every model with its runtime's state) work for
+any client; the `POST /box/*` actions need an `admin` client or the admin
+socket (the CLI uses the socket).
 
 ## Install (the 3090 box)
+
+Before installing, every GPU runtime must run under its `kiri-run@<stack>`
+unit with the `restart: "no"` stacks described below: the scheduler only
+adopts a runtime that is running in its unit and answering, and treats GPU
+memory used by anything else as a fault (tested on the box Nov 23: with
+rt-maya running outside a unit it faulted and started nothing).
 
 See `contrib/`: `kiri-sched.service` (sandboxed, `Type=notify`, watchdog),
 `kiri-run@.service` (a stack whose stop really stops it), the polkit rule
