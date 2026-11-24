@@ -40,4 +40,5 @@ ExecStop=/opt/box/bin/kiri-compose down
 ExecStopPost=/opt/box/bin/kiri-compose down
 Restart=no
 TimeoutStartSec=180
-TimeoutStopSec=90
+# Bounds each runtime's stop_timeout_secs in sched.toml (keep those under it).
+TimeoutStopSec=300

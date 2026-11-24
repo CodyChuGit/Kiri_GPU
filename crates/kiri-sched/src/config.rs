@@ -161,6 +161,10 @@ pub struct Runtime {
     /// until something else is asked for.
     #[serde(default)]
     pub home_after_idle_secs: Option<u64>,
+    /// How long its stack gets to stop; unset means `[sched]
+    /// stop_timeout_secs`. Keep it under kiri-run@'s TimeoutStopSec (300 s).
+    #[serde(default)]
+    pub stop_timeout_secs: u64,
     /// How many GPUs it needs; unset means all of them. A runtime that needs
     /// fewer shares the box with others that fit beside it.
     #[serde(default)]
@@ -280,6 +284,9 @@ impl Config {
             }
             if r.cards == 0 {
                 r.cards = c.sched.gpus;
+            }
+            if r.stop_timeout_secs == 0 {
+                r.stop_timeout_secs = c.sched.stop_timeout_secs;
             }
         }
         for s in &mut c.services {
@@ -516,6 +523,7 @@ mod tests {
         assert_eq!(c.sched.gpus, 2);
         assert_eq!(c.cards("maya"), 2);
         assert_eq!(c.cards("comfyui"), 1);
+        assert_eq!(c.runtime("maya").unwrap().stop_timeout_secs, 90);
     }
 
     #[test]

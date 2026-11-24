@@ -156,7 +156,7 @@ impl<H: Host> Engine<H> {
                 "reconcile-stop",
                 json!({"runtime": r.name, "why": "running at startup but not answering, or on cards it cannot keep"}),
             );
-            if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+            if let Err(e) = self.stop_within(&r.unit, r.stop_timeout_secs).await {
                 self.core().stuck(&r.name);
                 self.core()
                     .switch_fault(format!("could not stop {} at startup: {e}", r.name));
@@ -230,7 +230,7 @@ impl<H: Host> Engine<H> {
                 audit("unstuck", json!({"runtime": rt, "now": "stopped"}));
                 self.core().unstuck_stopped(&rt);
             } else {
-                match self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+                match self.stop_within(&r.unit, r.stop_timeout_secs).await {
                     Ok(()) => {
                         audit("unstuck", json!({"runtime": rt, "now": "stopped"}));
                         self.core().unstuck_stopped(&rt);
@@ -291,11 +291,10 @@ impl<H: Host> Engine<H> {
         }
         // All at once: two one-card runtimes giving way to a two-card one
         // cost one stop, not two.
-        let secs = cfg.sched.stop_timeout_secs;
         let results = join_all(
             to_stop
                 .iter()
-                .map(|r| Box::pin(self.stop_within(&r.unit, secs)) as StopFut<'_>)
+                .map(|r| Box::pin(self.stop_within(&r.unit, r.stop_timeout_secs)) as StopFut<'_>)
                 .collect(),
         )
         .await;
@@ -374,7 +373,7 @@ impl<H: Host> Engine<H> {
                 // Roll back: the failed runtime is stopped again so its
                 // cards are empty for whatever comes next.
                 if let Err(e) = self
-                    .stop_within(&rt.unit, cfg.sched.stop_timeout_secs)
+                    .stop_within(&rt.unit, rt.stop_timeout_secs)
                     .await
                 {
                     return self
@@ -436,7 +435,7 @@ impl<H: Host> Engine<H> {
             }
             audit("crashed", json!({"runtime": rt, "unit_active": active}));
             health.failing_since.remove(&rt);
-            if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+            if let Err(e) = self.stop_within(&r.unit, r.stop_timeout_secs).await {
                 self.core().stuck(&rt);
                 return self.fault(format!("{rt} stopped answering and would not stop: {e}"));
             }

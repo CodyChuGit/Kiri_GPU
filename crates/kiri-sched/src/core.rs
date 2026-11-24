@@ -923,7 +923,7 @@ impl Core {
                 by: by.to_owned(),
                 after_ready_secs: Some(secs),
                 start_by: Some(
-                    now + (s.drain_secs + s.stop_timeout_secs + s.vram_wait_secs
+                    now + (s.drain_secs + r.stop_timeout_secs + s.vram_wait_secs
                         + r.start_timeout_secs
                         + 60)
                         * 1000,
