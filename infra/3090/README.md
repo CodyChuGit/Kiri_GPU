@@ -76,8 +76,8 @@ Every service gets `restart: unless-stopped`, a healthcheck (box-probe, since
 many images have no curl), CPU/memory/pids limits, persistent bind mounts, and
 an image pinned by digest. Secrets live only in `.env` (mode 600, git-ignored).
 
-Only one GPU stack should run at a time: each one owns both 3090s. Add
-`Conflicts=kiri-stack@<other>.service` in a drop-in per stack.
+GPU stacks are different: they belong to the GPU scheduler (next section),
+not to `kiri-stack@`. Light (non-GPU) services stay on `kiri-stack@`.
 
 | Path in the container | On the host | Backed up |
 |---|---|---|
@@ -86,6 +86,32 @@ Only one GPU stack should run at a time: each one owns both 3090s. Add
 | `/models/shared` (ro), `/models/hf` | `/models/shared`, `/models/hf` | no |
 | `/scratch` | `/scratch/<name>` | never |
 | `/exchange` | `/box/exchange` | yes |
+
+## GPU stacks and the scheduler
+
+`kiri-sched` (crates/kiri-sched, installed by `install.sh`) keeps exactly one
+runtime on the two 3090s, switches between them on demand (from the front door
+on `127.0.0.1:7070` or `kiri-sched use <runtime>`), restarts a crashed runtime,
+and brings the home runtime back after a reboot. With
+`/etc/kiri/gpu-lease-required` present the Kiri daemon refuses any GPU
+container the scheduler did not start. So a GPU stack:
+
+- is listed as a `[[runtime]]` in `/etc/kiri-sched/sched.toml` and runs under
+  `kiri-run@<stack>` (never `systemctl enable kiri-stack@<stack>`);
+- has `restart: "no"` (the scheduler restarts it, with backoff) and the label
+  `dev.kiri.sched.runtime: <runtime>`;
+- uses `ipc: host` when it spreads one model over both cards (NCCL shm).
+
+Containers start at OOM score 0 (or the stack's `oom_score_adj`), not with the
+daemon's `OOMScoreAdjust=`, so a runaway engine is killed before Kiri, sshd or
+Tailscale.
+
+```sh
+kiri-sched status                     # who holds the GPUs, queue, faults
+kiri-sched use maya-deepseek [min]    # switch now (and keep it that long)
+kiri-sched hold <runtime> [min]       # nothing switches until release
+kiri-sched release; kiri-sched reset  # back to normal / clear a fault
+```
 
 ## Network
 
@@ -106,8 +132,9 @@ sudo systemctl reload kiri-stack@<name>    # apply compose/.env changes
 ```
 
 After an NVIDIA driver update: reboot (box-cdi-refresh regenerates the spec),
-then `sudo infra/3090/tests/gpu-validate.sh`. After a Kiri update: re-run
-`sudo infra/3090/install.sh` and the validation.
+then `sudo infra/3090/tests/gpu-validate.sh` (stop kiri-sched and set the lease
+marker aside first; see install.sh step 7). After a Kiri update: re-run
+`sudo infra/3090/install.sh`.
 
 ## What was tested where
 
