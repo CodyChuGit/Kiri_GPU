@@ -1,0 +1,21 @@
+# Regenerates the NVIDIA CDI spec at every boot, so a driver update never
+# leaves Kiri with stale library names (Kiri reads the spec at every container
+# start). Newer NVIDIA Container Toolkits also ship nvidia-cdi-refresh, which
+# writes /var/run/cdi/nvidia.yaml; Kiri prefers that file when both exist, so
+# the two never disagree.
+[Unit]
+Description=Generate the NVIDIA CDI spec for Kiri
+After=systemd-modules-load.service nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-ctk
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Loads nvidia_uvm and creates /dev/nvidia-uvm*, which CUDA needs and which
+# nothing creates on a headless box until the first CUDA call.
+ExecStartPre=-/usr/bin/nvidia-modprobe -u -c=0
+ExecStartPre=-/usr/bin/nvidia-modprobe -m
+ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+[Install]
+WantedBy=multi-user.target

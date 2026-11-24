@@ -1,0 +1,18 @@
+[package]
+name = "box-probe"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny static healthcheck probe for Kiri containers on the 3090 box (std only, no deps). Copied from CodyChuGit/NAS tools/nas-probe."
+license = "MIT"
+
+[dependencies]
+
+# Not part of Kiri's workspace: built on its own with --target x86_64-unknown-linux-musl.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

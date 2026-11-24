@@ -1,0 +1,96 @@
+# Template GPU service for the 3090 box. Copy this directory to
+# /box/config/kiri/stacks/<name>/, fill in .env, then
+#   sudo systemctl enable --now kiri-stack@<name>
+#
+# Rules every container here follows: restart unless-stopped, a healthcheck,
+# memory/CPU/pids limits, persistent volumes on /box and /models, image pinned
+# by digest, no secrets in git (they live in .env, mode 600, git-ignored).
+#
+# Networking: host network namespace, like the NAS stacks, so Kiri never writes
+# NAT or firewall rules; ufw/nftables on the host stays the only firewall. The
+# app should listen on 127.0.0.1 (reach it with `tailscale serve`) or on the
+# 25GbE address 10.25.0.11 if the NAS or the 5090 rig must call it directly.
+#
+# GPUs: both 3090s through the Kiri_GPU fork's CDI support. If
+# tests/gpu-validate.sh says only the raw route works, `touch gpu-raw` in this
+# directory and kiri-compose layers /box/config/kiri/gpu-raw.override.yaml on top.
+name: ${STACK_NAME:-gpu-app}
+
+x-probe: &probe
+  type: bind
+  source: /opt/box/bin/box-probe
+  target: /opt/box/bin/box-probe
+  read_only: true
+
+services:
+  app:
+    image: ${APP_IMAGE:?pin an image by digest in .env (repo:tag@sha256:...)}
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    env_file: [.env]
+    environment:
+      # CUDA_VISIBLE_DEVICES picks among the GPUs this container was given.
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      HF_HOME: /models/hf
+      TORCH_HOME: /models/torch
+      XDG_CACHE_HOME: /state/cache
+      APP_BIND: ${APP_BIND:-127.0.0.1}
+      APP_PORT: ${APP_PORT:?set APP_PORT in .env}
+    # command: ["your", "args"]   # only if the image CMD needs changing
+    volumes:
+      # App state, configs, databases: backed up nightly with /box.
+      - type: bind
+        source: /box/runtimes/${STACK_NAME:-gpu-app}/state
+        target: /state
+      # Weights: local 2TB model drive. Read-only unless the app downloads its own.
+      - type: bind
+        source: /models/${STACK_NAME:-gpu-app}
+        target: /models/app
+        read_only: ${MODELS_READ_ONLY:-false}
+      - type: bind
+        source: /models/shared
+        target: /models/shared
+        read_only: true
+      - type: bind
+        source: /models/hf
+        target: /models/hf
+      # Temp work, never backed up.
+      - type: bind
+        source: /scratch/${STACK_NAME:-gpu-app}
+        target: /scratch
+      # Handoffs between runtimes.
+      - type: bind
+        source: /box/exchange
+        target: /exchange
+      - *probe
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "/opt/box/bin/box-probe", "http://127.0.0.1:${APP_PORT}${APP_HEALTH_PATH:-/}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Loading weights onto two 3090s can take minutes.
+      start_period: ${APP_START_PERIOD:-300s}
+    # Limits: the box has 64 threads and 128 GB. Leave the host ~8 GB and some CPU.
+    cpus: ${APP_CPUS:-56}
+    mem_limit: ${APP_MEM:-112g}
+    memswap_limit: ${APP_MEM:-112g}
+    pids_limit: ${APP_PIDS:-8192}
+    # PyTorch DataLoader workers and NCCL use /dev/shm.
+    shm_size: ${APP_SHM:-16g}
+    ulimits:
+      memlock: -1
+      nofile: {soft: 65536, hard: 65536}
+    security_opt:
+      - no-new-privileges
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 50m, max-file: "3"}
