@@ -7,30 +7,30 @@ pub mod access;
 mod api;
 mod binds;
 mod builder;
-mod cdi;
 pub mod dns;
+pub mod tls;
+pub mod proxy;
 mod domains;
 mod engine;
 mod filters;
-mod gpulease;
 mod health;
 mod hostetc;
+mod cdi;
+mod gpulease;
 mod hostopts;
+mod mirror;
 mod http;
 mod logfile;
-mod mirror;
 mod names;
 mod network;
 #[cfg(target_os = "macos")]
 pub(crate) mod nfs;
 mod ops;
 pub(crate) mod ports;
-pub mod proxy;
 mod pulls;
 mod seccomp;
 mod seccomp_names;
 pub mod time;
-pub mod tls;
 #[cfg(target_os = "macos")]
 mod usb;
 mod vmcpu;
@@ -52,9 +52,7 @@ use crate::diag;
 /// HOME: `KIRI_SOCKET` may point the socket anywhere, but it must not move
 /// private state into a directory another user can prepare.
 pub fn state_dir() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME is not set"))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| io::Error::other("HOME is not set"))?;
     Ok(home.join(crate::flavor::STATE.get()))
 }
 
@@ -63,12 +61,8 @@ pub fn socket_path() -> io::Result<PathBuf> {
     if let Some(s) = std::env::var_os("KIRI_SOCKET") {
         return Ok(PathBuf::from(s));
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME is not set"))?;
-    Ok(home
-        .join(crate::flavor::STATE.get())
-        .join("run/docker.sock"))
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| io::Error::other("HOME is not set"))?;
+    Ok(home.join(crate::flavor::STATE.get()).join("run/docker.sock"))
 }
 
 /// Raises the soft open-file limit to the hard one, as Go does for dockerd.
@@ -83,11 +77,7 @@ fn raise_open_files() {
             return;
         }
         // macOS refuses more than OPEN_MAX for the soft limit.
-        let want = if cfg!(target_os = "macos") {
-            lim.rlim_max.min(10240)
-        } else {
-            lim.rlim_max
-        };
+        let want = if cfg!(target_os = "macos") { lim.rlim_max.min(10240) } else { lim.rlim_max };
         if lim.rlim_cur < want {
             lim.rlim_cur = want;
             libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
@@ -140,10 +130,7 @@ pub fn run(_args: &[String]) -> io::Result<()> {
             let gate = access::Gate::new(&socket, group)?;
             match gate.grant() {
                 Ok(n) => diag::info!("socket access list written", members = n),
-                Err(e) => diag::warn!(
-                    "socket access list not written: new members sign in again first",
-                    error = e
-                ),
+                Err(e) => diag::warn!("socket access list not written: new members sign in again first", error = e),
             }
             gate.clone().watch()?;
             Some(gate)
@@ -153,14 +140,8 @@ pub fn run(_args: &[String]) -> io::Result<()> {
 
     kiri_image::store::set_error_log(|message| diag::error!("image store", detail = message));
     let store = kiri_image::Store::open(kiri_image::Store::default_root()?)?;
-    let engine = engine::Engine::boot(store)
-        .inspect_err(|e| diag::error!("engine did not start", error = e))?;
-    diag::info!(
-        "engine ready",
-        version = env!("CARGO_PKG_VERSION"),
-        ms = t0.elapsed().as_millis(),
-        socket = format!("unix://{}", socket.display())
-    );
+    let engine = engine::Engine::boot(store).inspect_err(|e| diag::error!("engine did not start", error = e))?;
+    diag::info!("engine ready", version = env!("CARGO_PKG_VERSION"), ms = t0.elapsed().as_millis(), socket = format!("unix://{}", socket.display()));
     // Crash files from earlier runs, if the person said they may go.
     diag::report::spawn_crash_sender(Duration::from_secs(30), Some(Duration::from_secs(6 * 3600)));
     // Container files in Finder, at ~/Kiri. A Linux host has them on its
@@ -178,36 +159,21 @@ pub fn run(_args: &[String]) -> io::Result<()> {
     let routers = !crate::flavor::dev() || domains::own_ports();
     if crate::flavor::dev() {
         if !routers {
-            diag::info!(format!(
-                "{}: container domains off (ports in Settings → Domains turn them on)",
-                crate::flavor::APP
-            ));
+            diag::info!(format!("{}: container domains off (ports in Settings → Domains turn them on)", crate::flavor::APP));
         }
     } else if let Err(e) = dns::start() {
         diag::warn!("*.kiri.local off", error = e);
     }
     if routers {
         match domains::start_tls(engine.clone()) {
-            Ok(port) => diag::info!(
-                "HTTPS for container domains",
-                port = port,
-                trusted = tls::trusted()
-            ),
+            Ok(port) => diag::info!("HTTPS for container domains", port = port, trusted = tls::trusted()),
             Err(e) => diag::warn!("HTTPS for container domains off", error = e),
         }
         match domains::start(engine.clone()) {
             Ok(port) => diag::info!(format!(
                 "container domains on http://<name>.{}{}",
-                if dns::installed() {
-                    "kiri.local"
-                } else {
-                    "kiri.localhost"
-                },
-                if port == 80 {
-                    String::new()
-                } else {
-                    format!(":{port}")
-                }
+                if dns::installed() { "kiri.local" } else { "kiri.localhost" },
+                if port == 80 { String::new() } else { format!(":{port}") }
             )),
             Err(e) => diag::warn!("container domains off", error = e),
         }
@@ -217,42 +183,38 @@ pub fn run(_args: &[String]) -> io::Result<()> {
 
     let on_signal = engine.clone();
     let sock = socket.clone();
-    std::thread::Builder::new()
-        .name("kiri-signals".into())
-        .spawn(move || {
-            let mut sig = 0;
-            // SAFETY: waits on the blocked set; writes the signal number to `sig`.
-            unsafe { libc::sigwait(&set, &mut sig) };
-            diag::info!("engine shutting down", signal = sig);
-            #[cfg(target_os = "macos")]
-            nfs::unmount();
-            let _ = std::fs::remove_file(&sock);
-            on_signal.shutdown();
-            // Give the guest a moment to power off before the VM is released.
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            std::process::exit(0);
-        })?;
+    std::thread::Builder::new().name("kiri-signals".into()).spawn(move || {
+        let mut sig = 0;
+        // SAFETY: waits on the blocked set; writes the signal number to `sig`.
+        unsafe { libc::sigwait(&set, &mut sig) };
+        diag::info!("engine shutting down", signal = sig);
+        #[cfg(target_os = "macos")]
+        nfs::unmount();
+        let _ = std::fs::remove_file(&sock);
+        on_signal.shutdown();
+        // Give the guest a moment to power off before the VM is released.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::process::exit(0);
+    })?;
 
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let engine = engine.clone();
         #[cfg(target_os = "linux")]
         let gate = gate.clone();
-        let spawned = std::thread::Builder::new()
-            .name("kiri-api".into())
-            .spawn(move || {
-                // Checked here, not in the accept loop: a slow user lookup holds up
-                // this connection only.
-                #[cfg(target_os = "linux")]
-                let _seat = match &gate {
-                    Some(gate) => match gate.admit(&conn) {
-                        Some(seat) => Some(seat),
-                        None => return,
-                    },
-                    None => None,
-                };
-                let _ = api::serve(conn, engine);
-            });
+        let spawned = std::thread::Builder::new().name("kiri-api".into()).spawn(move || {
+            // Checked here, not in the accept loop: a slow user lookup holds up
+            // this connection only.
+            #[cfg(target_os = "linux")]
+            let _seat = match &gate {
+                Some(gate) => match gate.admit(&conn) {
+                    Some(seat) => Some(seat),
+                    None => return,
+                },
+                None => None,
+            };
+            let _ = api::serve(conn, engine);
+        });
         if let Err(e) = spawned {
             diag::error!("cannot start a connection thread", error = e);
         }
@@ -265,10 +227,7 @@ pub fn run(_args: &[String]) -> io::Result<()> {
 /// stays, so the app taken up again takes it again), and the engine stops.
 fn watch_own_app(engine: std::sync::Arc<engine::Engine>, socket: std::path::PathBuf) {
     crate::appwatch::watch(move |exe| {
-        diag::error!(
-            "the app this engine runs from was deleted; stopping and handing docker build back",
-            path = exe.display()
-        );
+        diag::error!("the app this engine runs from was deleted; stopping and handing docker build back", path = exe.display());
         if let Err(e) = crate::buildwith::places().and_then(|p| p.give_back()) {
             diag::warn!("docker build not handed back", error = e);
         }
@@ -299,16 +258,12 @@ fn finder(engine: &std::sync::Arc<engine::Engine>) {
 
 /// Gives `group` read-write access to the socket.
 fn socket_group(socket: &std::path::Path, group: &std::ffi::OsStr) -> io::Result<()> {
-    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(group))
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(group)).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: getgrnam with a valid C string; the result is read at once.
     let gid = unsafe {
         let g = libc::getgrnam(name.as_ptr());
         if g.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no group {}", group.to_string_lossy()),
-            ));
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("no group {}", group.to_string_lossy())));
         }
         (*g).gr_gid
     };

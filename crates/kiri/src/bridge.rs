@@ -31,7 +31,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -87,28 +87,13 @@ const LOG: &str = "/var/log/kiri.log";
 type Out = Arc<Mutex<dyn Write + Send>>;
 
 pub fn run(args: &[String]) -> io::Result<()> {
-    let socket = match args
-        .iter()
-        .position(|a| a == "--socket")
-        .and_then(|i| args.get(i + 1))
-    {
+    let socket = match args.iter().position(|a| a == "--socket").and_then(|i| args.get(i + 1)) {
         Some(s) => PathBuf::from(s),
         None => crate::daemon::socket_path()?,
     };
-    let out: Out = Arc::new(Mutex::new(BufWriter::with_capacity(
-        64 * 1024,
-        io::stdout(),
-    )));
-    let starter = Arc::new(Starter::new(
-        socket,
-        Box::new(start_engine),
-        PathBuf::from(LOG),
-    ));
-    serve(
-        BufReader::with_capacity(64 * 1024, io::stdin()),
-        &out,
-        &starter,
-    )
+    let out: Out = Arc::new(Mutex::new(BufWriter::with_capacity(64 * 1024, io::stdout())));
+    let starter = Arc::new(Starter::new(socket, Box::new(start_engine), PathBuf::from(LOG)));
+    serve(BufReader::with_capacity(64 * 1024, io::stdin()), &out, &starter)
 }
 
 /// One connection, as the frame reader sees it.
@@ -137,24 +122,12 @@ fn serve(mut input: impl Read, out: &Out, starter: &Arc<Starter>) -> io::Result<
                 let (tx, rx) = channel::<Op>();
                 let queued = Arc::new(AtomicUsize::new(0));
                 let window = credit.then(|| Arc::new(Window::default()));
-                conns.insert(
-                    id,
-                    Conn {
-                        tx,
-                        queued: queued.clone(),
-                        window: window.clone(),
-                    },
-                );
+                conns.insert(id, Conn { tx, queued: queued.clone(), window: window.clone() });
                 let (out, starter) = (out.clone(), starter.clone());
-                std::thread::Builder::new()
-                    .name("kiri-bridge-w".into())
-                    .spawn(move || writer(id, &starter, &rx, &queued, &out, credit, window))?;
+                std::thread::Builder::new().name("kiri-bridge-w".into()).spawn(move || writer(id, &starter, &rx, &queued, &out, credit, window))?;
             }
             ACK => {
-                if let (Some(w), Some(n)) = (
-                    conns.get(&id).and_then(|c| c.window.as_ref()),
-                    ack_count(&data),
-                ) {
+                if let (Some(w), Some(n)) = (conns.get(&id).and_then(|c| c.window.as_ref()), ack_count(&data)) {
                     w.ack(n);
                 }
             }
@@ -176,21 +149,15 @@ fn serve(mut input: impl Read, out: &Out, starter: &Arc<Starter>) -> io::Result<
                 let ended = !overflow && c.tx.send(op).is_err();
                 if overflow || ended || kind == CLOSE {
                     if let Some(c) = conns.remove(&id)
-                        && let Some(w) = c.window
-                    {
-                        w.close();
-                    }
+                        && let Some(w) = c.window {
+                            w.close();
+                        }
                     if overflow {
                         send(out, CLOSE, id, &[])?;
                     }
                 }
             }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("bad bridge frame {kind}"),
-                ));
-            }
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad bridge frame {kind}"))),
         }
     }
     for c in conns.into_values() {
@@ -216,22 +183,11 @@ enum Op {
 /// Once the daemon's side has gone, input is still taken and acknowledged,
 /// unwritten, so kiri-win's sender never waits on credit that cannot come.
 /// A daemon it cannot reach closes the connection with why.
-fn writer(
-    id: u32,
-    starter: &Arc<Starter>,
-    rx: &Receiver<Op>,
-    queued: &AtomicUsize,
-    out: &Out,
-    credit: bool,
-    window: Option<Arc<Window>>,
-) {
+fn writer(id: u32, starter: &Arc<Starter>, rx: &Receiver<Op>, queued: &AtomicUsize, out: &Out, credit: bool, window: Option<Arc<Window>>) {
     let reached = starter.connect().and_then(|s| {
         let reader = s.try_clone().map_err(|e| e.to_string())?;
         let (o, st) = (out.clone(), starter.clone());
-        std::thread::Builder::new()
-            .name("kiri-bridge".into())
-            .spawn(move || replies(id, reader, &o, window.as_deref(), &st))
-            .map_err(|e| e.to_string())?;
+        std::thread::Builder::new().name("kiri-bridge".into()).spawn(move || replies(id, reader, &o, window.as_deref(), &st)).map_err(|e| e.to_string())?;
         Ok(s)
     });
     let mut s = match reached {
@@ -256,13 +212,12 @@ fn writer(
                 queued.fetch_sub(d.len(), Ordering::SeqCst);
                 done += d.len();
                 if let Some(out) = acks
-                    && (done >= ACK_EVERY || broken)
-                {
-                    if send(out, ACK, id, &(done as u32).to_be_bytes()).is_err() {
-                        break;
+                    && (done >= ACK_EVERY || broken) {
+                        if send(out, ACK, id, &(done as u32).to_be_bytes()).is_err() {
+                            break;
+                        }
+                        done = 0;
                     }
-                    done = 0;
-                }
             }
             Op::Eof => {
                 let _ = s.shutdown(Shutdown::Write);
@@ -342,22 +297,8 @@ struct StartState {
 }
 
 impl Starter {
-    fn new(
-        socket: PathBuf,
-        start: Box<dyn Fn(Instant) -> Result<(), String> + Send + Sync>,
-        log: PathBuf,
-    ) -> Starter {
-        Starter {
-            socket,
-            start,
-            log,
-            limit: START_LIMIT,
-            state: Mutex::new(StartState {
-                backoff: RETRY_AFTER,
-                ..StartState::default()
-            }),
-            cv: Condvar::new(),
-        }
+    fn new(socket: PathBuf, start: Box<dyn Fn(Instant) -> Result<(), String> + Send + Sync>, log: PathBuf) -> Starter {
+        Starter { socket, start, log, limit: START_LIMIT, state: Mutex::new(StartState { backoff: RETRY_AFTER, ..StartState::default() }), cv: Condvar::new() }
     }
 
     /// A connection to the daemon, or why there is none.
@@ -367,16 +308,11 @@ impl Starter {
             // Its first reply ends a back-off (`answered`), not this: a
             // daemon dying as it boots still takes connections.
             Ok(s) => return Ok(s),
-            Err(e) if !gone(&e) => {
-                return Err(format!("the bridge could not reach its socket ({e})"));
-            }
+            Err(e) if !gone(&e) => return Err(format!("the bridge could not reach its socket ({e})")),
             Err(_) => {}
         }
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        st = self
-            .cv
-            .wait_while(st, |s| s.running)
-            .unwrap_or_else(|e| e.into_inner());
+        st = self.cv.wait_while(st, |s| s.running).unwrap_or_else(|e| e.into_inner());
         // A start ended since the try above (this one waited for it, or it
         // ended just after): its outcome is this connection's too.
         if st.ended != ended {
@@ -384,8 +320,7 @@ impl Starter {
                 return Err(why.clone());
             }
             drop(st);
-            return UnixStream::connect(&self.socket)
-                .map_err(|e| format!("it started, then did not answer ({e})"));
+            return UnixStream::connect(&self.socket).map_err(|e| format!("it started, then did not answer ({e})"));
         }
         if let Some((at, why)) = &st.failed
             && at.elapsed() < st.backoff
@@ -394,15 +329,10 @@ impl Starter {
         }
         st.running = true;
         // The same failure again at the longest back-off: not logged.
-        let last = st
-            .failed
-            .as_ref()
-            .map(|(_, why)| why.clone())
-            .filter(|_| st.backoff >= RETRY_MOST);
+        let last = st.failed.as_ref().map(|(_, why)| why.clone()).filter(|_| st.backoff >= RETRY_MOST);
         // The last start's daemon took a connection and has gone: said here,
         // as nothing could say it when it went.
-        let unanswered =
-            last.is_none() && st.failed.as_ref().is_some_and(|(_, why)| why == NO_ANSWER);
+        let unanswered = last.is_none() && st.failed.as_ref().is_some_and(|(_, why)| why == NO_ANSWER);
         drop(st);
         if unanswered {
             self.note(&format!("engine did not start: {NO_ANSWER}"));
@@ -410,10 +340,7 @@ impl Starter {
         // Records how the start ended and wakes those waiting above, when
         // dropped: also on a panic where panics unwind (tests; a release
         // build aborts on one, panic = "abort").
-        let mut ending = Ending {
-            starter: self,
-            failed: Some("the bridge's start of the engine ended unexpectedly".to_owned()),
-        };
+        let mut ending = Ending { starter: self, failed: Some("the bridge's start of the engine ended unexpectedly".to_owned()) };
         let r = self.start_and_connect(last.as_deref());
         ending.failed = r.as_ref().err().cloned();
         r
@@ -443,12 +370,7 @@ impl Starter {
                     }
                     return Ok(s);
                 }
-                Err(e) if Instant::now() >= until => {
-                    return failed(format!(
-                        "it did not answer within {} s ({e}); see {LOG}",
-                        self.limit.as_secs()
-                    ));
-                }
+                Err(e) if Instant::now() >= until => return failed(format!("it did not answer within {} s ({e}); see {LOG}", self.limit.as_secs())),
                 Err(_) => std::thread::sleep(Duration::from_millis(100)),
             }
         }
@@ -466,11 +388,7 @@ impl Starter {
     fn note(&self, msg: &str) {
         let t = crate::daemon::time::rfc3339(SystemTime::now());
         let line = format!("{}Z kiri bridge: {msg}\n", t.get(..23).unwrap_or(&t));
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log)
-        {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.log) {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -494,16 +412,9 @@ impl Drop for Ending<'_> {
         st.connected = self.failed.is_none();
         let why = self.failed.take().unwrap_or_else(|| NO_ANSWER.to_owned());
         let was = st.backoff;
-        st.backoff = if st.failed.is_some() {
-            (was * 2).min(RETRY_MOST)
-        } else {
-            RETRY_AFTER
-        };
+        st.backoff = if st.failed.is_some() { (was * 2).min(RETRY_MOST) } else { RETRY_AFTER };
         if st.backoff == RETRY_MOST && was < RETRY_MOST {
-            s.note(&format!(
-                "engine keeps failing to start; trying again every {} s, logging only a new reason",
-                RETRY_MOST.as_secs()
-            ));
+            s.note(&format!("engine keeps failing to start; trying again every {} s, logging only a new reason", RETRY_MOST.as_secs()));
         }
         st.failed = Some((Instant::now(), why));
         s.cv.notify_all();
@@ -513,10 +424,7 @@ impl Drop for Ending<'_> {
 /// Whether a connect's error means no daemon is there: the socket file is
 /// missing, or left behind by one that has gone.
 fn gone(e: &io::Error) -> bool {
-    matches!(
-        e.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-    )
+    matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
 }
 
 /// Starts the daemon as this distro does: kiri-start in Kiri Linux,
@@ -534,32 +442,21 @@ fn start_engine(until: Instant) -> Result<(), String> {
     } else {
         return Err("nothing in this Linux starts it (no kiri-start, no systemd)".to_owned());
     };
-    let what = if kiri_start {
-        "kiri-start"
-    } else {
-        "systemctl start kiri"
-    };
+    let what = if kiri_start { "kiri-start" } else { "systemctl start kiri" };
     // stdin and stdout are kiri-win's frames: never handed on. Its own
     // process group, so nothing sent to the bridge's reaches the daemon.
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not run {what} ({e})"))?;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| format!("could not run {what} ({e})"))?;
     // Read on a thread of its own: the daemon does not keep it open
     // (kiri-start sends its output to the log), but nothing here may wait on that.
     let (tx, rx) = channel();
     if let Some(mut err) = child.stderr.take() {
         // No thread to be had: its last line is not read, and the start goes on.
-        let _ = std::thread::Builder::new()
-            .name("kiri-start-err".into())
-            .spawn(move || {
-                let mut said = String::new();
-                let _ = err.read_to_string(&mut said);
-                let _ = tx.send(said);
-            });
+        let _ = std::thread::Builder::new().name("kiri-start-err".into()).spawn(move || {
+            let mut said = String::new();
+            let _ = err.read_to_string(&mut said);
+            let _ = tx.send(said);
+        });
     }
     let status = loop {
         match child.try_wait() {
@@ -567,10 +464,7 @@ fn start_engine(until: Instant) -> Result<(), String> {
             Ok(None) if Instant::now() >= until => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "{what} did not finish in {} s",
-                    START_LIMIT.as_secs()
-                ));
+                return Err(format!("{what} did not finish in {} s", START_LIMIT.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(format!("{what}: {e}")),
@@ -580,18 +474,8 @@ fn start_engine(until: Instant) -> Result<(), String> {
         return Ok(());
     }
     // Within the deadline too: a child it left may hold stderr open.
-    let said = rx
-        .recv_timeout(
-            until
-                .saturating_duration_since(Instant::now())
-                .min(Duration::from_secs(1)),
-        )
-        .unwrap_or_default();
-    Err(said
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty())
-        .map_or_else(|| format!("{what} failed ({status})"), str::to_owned))
+    let said = rx.recv_timeout(until.saturating_duration_since(Instant::now()).min(Duration::from_secs(1))).unwrap_or_default();
+    Err(said.lines().map(str::trim).rfind(|l| !l.is_empty()).map_or_else(|| format!("{what} failed ({status})"), str::to_owned))
 }
 
 /// The credit one way on one connection: bytes sent and not yet acknowledged.
@@ -659,10 +543,7 @@ fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, u32, Vec<u8>)>> {
     let len = u32::from_be_bytes([h[5], h[6], h[7], h[8]]) as usize;
     // The length comes off the wire: refuse it before allocating it.
     if len > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("frame of {len} bytes"),
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame of {len} bytes")));
     }
     let mut data = vec![0u8; len];
     r.read_exact(&mut data)?;
@@ -681,14 +562,8 @@ mod tests {
         wire.extend_from_slice(b"abc");
         wire.extend_from_slice(&super::header(super::EOF, 7, 0));
         let mut r = &wire[..];
-        assert_eq!(
-            super::read_frame(&mut r).unwrap(),
-            Some((super::DATA, 7, b"abc".to_vec()))
-        );
-        assert_eq!(
-            super::read_frame(&mut r).unwrap(),
-            Some((super::EOF, 7, vec![]))
-        );
+        assert_eq!(super::read_frame(&mut r).unwrap(), Some((super::DATA, 7, b"abc".to_vec())));
+        assert_eq!(super::read_frame(&mut r).unwrap(), Some((super::EOF, 7, vec![])));
         assert_eq!(super::read_frame(&mut r).unwrap(), None);
     }
 
@@ -696,37 +571,22 @@ mod tests {
     fn oversized_frames_are_refused() {
         let mut wire = super::header(super::DATA, 7, super::MAX_FRAME).to_vec();
         wire.resize(wire.len() + super::MAX_FRAME, 0);
-        assert_eq!(
-            super::read_frame(&mut &wire[..])
-                .unwrap()
-                .map(|f| f.2.len()),
-            Some(super::MAX_FRAME)
-        );
+        assert_eq!(super::read_frame(&mut &wire[..]).unwrap().map(|f| f.2.len()), Some(super::MAX_FRAME));
         // 4 GiB claimed, nothing behind it: an error at once, not an allocation.
         let huge = super::header(super::DATA, 7, u32::MAX as usize);
-        assert_eq!(
-            super::read_frame(&mut &huge[..]).unwrap_err().kind(),
-            std::io::ErrorKind::InvalidData
-        );
+        assert_eq!(super::read_frame(&mut &huge[..]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 
     /// A bridge between socket pairs, to a "daemon" on its own socket that
     /// `daemon` serves (one connection). Returns kiri-win's ends: what it
     /// writes to the bridge, and what it reads from it.
-    fn bridge(
-        name: &str,
-        daemon: impl FnOnce(UnixStream) + Send + 'static,
-    ) -> (UnixStream, UnixStream, PathBuf) {
+    fn bridge(name: &str, daemon: impl FnOnce(UnixStream) + Send + 'static) -> (UnixStream, UnixStream, PathBuf) {
         let dir = temp(name);
         let sock = dir.join("d.sock");
         let l = UnixListener::bind(&sock).unwrap();
         std::thread::spawn(move || daemon(l.accept().unwrap().0));
         // The daemon is up: nothing is ever started.
-        let starter = Arc::new(Starter::new(
-            sock,
-            Box::new(|_| panic!("started a daemon that was up")),
-            dir.join("log"),
-        ));
+        let starter = Arc::new(Starter::new(sock, Box::new(|_| panic!("started a daemon that was up")), dir.join("log")));
         let (to_bridge, from_bridge) = bridge_to(starter);
         (to_bridge, from_bridge, dir)
     }
@@ -815,19 +675,11 @@ mod tests {
         }
         let done = outcomes(&mut from_bridge, 4);
         for id in 1..=4 {
-            assert_eq!(
-                done[&id],
-                Ok(format!("ping {id}").into_bytes()),
-                "connection {id}"
-            );
+            assert_eq!(done[&id], Ok(format!("ping {id}").into_bytes()), "connection {id}");
         }
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
-        assert!(
-            log.contains("kiri bridge: engine not answering on its socket; starting it")
-                && log.contains("kiri bridge: engine started"),
-            "{log}"
-        );
+        assert!(log.contains("kiri bridge: engine not answering on its socket; starting it") && log.contains("kiri bridge: engine started"), "{log}");
         // Up now: a later connection starts nothing.
         frame(&mut to_bridge, OPEN, 5, &[1]);
         frame(&mut to_bridge, DATA, 5, b"again");
@@ -855,20 +707,12 @@ mod tests {
         let (mut to_bridge, mut from_bridge) = bridge_to(starter.clone());
         frame(&mut to_bridge, OPEN, 1, &[1]);
         frame(&mut to_bridge, DATA, 1, b"GET /_ping HTTP/1.1\r\n\r\n");
-        assert_eq!(
-            outcomes(&mut from_bridge, 1)[&1],
-            Err("kiri daemon exited as it started; see /var/log/kiri.log".to_owned())
-        );
+        assert_eq!(outcomes(&mut from_bridge, 1)[&1], Err("kiri daemon exited as it started; see /var/log/kiri.log".to_owned()));
         for id in 2..=3 {
             frame(&mut to_bridge, OPEN, id, &[]);
         }
         let done = outcomes(&mut from_bridge, 2);
-        assert!(
-            done.values().all(|r| r
-                .as_ref()
-                .is_err_and(|e| e.contains("exited as it started"))),
-            "{done:?}"
-        );
+        assert!(done.values().all(|r| r.as_ref().is_err_and(|e| e.contains("exited as it started"))), "{done:?}");
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         // After RETRY_AFTER, the next connection tries again.
         starter.state.lock().unwrap().failed.as_mut().unwrap().0 -= RETRY_AFTER;
@@ -876,12 +720,7 @@ mod tests {
         assert!(outcomes(&mut from_bridge, 1)[&4].is_err());
         assert_eq!(starts.load(Ordering::SeqCst), 2);
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
-        assert_eq!(
-            log.matches("engine did not start: kiri daemon exited as it started")
-                .count(),
-            2,
-            "{log}"
-        );
+        assert_eq!(log.matches("engine did not start: kiri daemon exited as it started").count(), 2, "{log}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -890,16 +729,12 @@ mod tests {
     #[test]
     fn a_start_with_no_daemon_ends_at_the_deadline() {
         let dir = temp("nodaemon");
-        let mut starter =
-            Starter::new(dir.join("none.sock"), Box::new(|_| Ok(())), dir.join("log"));
+        let mut starter = Starter::new(dir.join("none.sock"), Box::new(|_| Ok(())), dir.join("log"));
         starter.limit = Duration::from_secs(1);
         let began = Instant::now();
         let why = starter.connect().unwrap_err();
         assert!(why.starts_with("it did not answer within 1 s"), "{why}");
-        assert!(
-            began.elapsed() >= starter.limit
-                && began.elapsed() < starter.limit + Duration::from_secs(1)
-        );
+        assert!(began.elapsed() >= starter.limit && began.elapsed() < starter.limit + Duration::from_secs(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -909,9 +744,7 @@ mod tests {
     #[test]
     fn failed_starts_back_off_and_are_logged_boundedly() {
         let dir = temp("backoff");
-        let why = Arc::new(Mutex::new(Err::<(), String>(
-            "kiri daemon exited as it started".to_owned(),
-        )));
+        let why = Arc::new(Mutex::new(Err::<(), String>("kiri daemon exited as it started".to_owned())));
         let (w, sock) = (why.clone(), dir.join("d.sock"));
         let s = sock.clone();
         let mut starter = Starter::new(
@@ -942,42 +775,22 @@ mod tests {
         }
         assert_eq!(backoffs, [5, 10, 20, 40, 80, 160, 300, 300, 300]);
         // Within the back-off: its reason, with no start.
-        assert_eq!(
-            starter.connect().unwrap_err(),
-            "kiri daemon exited as it started"
-        );
+        assert_eq!(starter.connect().unwrap_err(), "kiri daemon exited as it started");
         let log = std::fs::read_to_string(dir.join("log")).unwrap();
         // Seven tries logged, then the two at the longest back-off not.
         assert_eq!(log.matches("starting it").count(), 7, "{log}");
-        assert_eq!(
-            log.matches("engine did not start: kiri daemon exited as it started")
-                .count(),
-            7,
-            "{log}"
-        );
+        assert_eq!(log.matches("engine did not start: kiri daemon exited as it started").count(), 7, "{log}");
         assert_eq!(log.matches("trying again every 300 s").count(), 1, "{log}");
         // A new reason is logged.
         *why.lock().unwrap() = Err("could not run kiri-start".to_owned());
         retry(&starter);
         assert!(starter.connect().is_err());
-        assert!(
-            std::fs::read_to_string(dir.join("log"))
-                .unwrap()
-                .contains("engine did not start: could not run kiri-start")
-        );
+        assert!(std::fs::read_to_string(dir.join("log")).unwrap().contains("engine did not start: could not run kiri-start"));
         // A start that works resets the back-off once the engine answers.
         *why.lock().unwrap() = Ok(());
         retry(&starter);
         assert!(starter.connect().is_ok());
-        assert!(
-            starter
-                .state
-                .lock()
-                .unwrap()
-                .failed
-                .as_ref()
-                .is_some_and(|(_, w)| w == NO_ANSWER)
-        );
+        assert!(starter.state.lock().unwrap().failed.as_ref().is_some_and(|(_, w)| w == NO_ANSWER));
         starter.answered();
         let st = starter.state.lock().unwrap();
         assert!(st.failed.is_none() && st.backoff == RETRY_AFTER);
@@ -991,17 +804,10 @@ mod tests {
     fn a_daemon_that_answers_resets_the_back_off() {
         let dir = temp("answers");
         let sock = dir.join("d.sock");
-        let starter = Arc::new(Starter::new(
-            sock.clone(),
-            Box::new(|_| panic!("started a daemon that answers")),
-            dir.join("log"),
-        ));
+        let starter = Arc::new(Starter::new(sock.clone(), Box::new(|_| panic!("started a daemon that answers")), dir.join("log")));
         {
             let mut st = starter.state.lock().unwrap();
-            st.failed = Some((
-                Instant::now(),
-                "kiri daemon exited as it started".to_owned(),
-            ));
+            st.failed = Some((Instant::now(), "kiri daemon exited as it started".to_owned()));
             st.backoff = RETRY_MOST;
         }
         echo_daemon(&sock);
@@ -1051,16 +857,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(400));
         }
         assert_eq!(starts.load(Ordering::SeqCst), 1, "{done:?}");
-        assert!(
-            done[0].as_ref().is_ok_and(Vec::is_empty) || done[0].is_err(),
-            "{done:?}"
-        );
-        assert!(
-            done[1..]
-                .iter()
-                .all(|r| r.as_ref().is_err_and(|e| e == NO_ANSWER)),
-            "{done:?}"
-        );
+        assert!(done[0].as_ref().is_ok_and(Vec::is_empty) || done[0].is_err(), "{done:?}");
+        assert!(done[1..].iter().all(|r| r.as_ref().is_err_and(|e| e == NO_ANSWER)), "{done:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1086,10 +884,7 @@ mod tests {
         let s = starter.clone();
         let second = std::thread::spawn(move || s.connect());
         assert!(first.join().is_err());
-        assert_eq!(
-            second.join().unwrap().unwrap_err(),
-            "the bridge's start of the engine ended unexpectedly"
-        );
+        assert_eq!(second.join().unwrap().unwrap_err(), "the bridge's start of the engine ended unexpectedly");
         assert!(!starter.state.lock().unwrap().running);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1100,18 +895,11 @@ mod tests {
     #[test]
     fn a_connection_that_could_not_connect_is_closed_once() {
         let dir = temp("once");
-        let starter = Arc::new(Starter::new(
-            dir.join("none.sock"),
-            Box::new(|_| Err("no engine here".to_owned())),
-            dir.join("log"),
-        ));
+        let starter = Arc::new(Starter::new(dir.join("none.sock"), Box::new(|_| Err("no engine here".to_owned())), dir.join("log")));
         let (mut to_bridge, mut from_bridge) = bridge_to(starter);
         // Without credit (a kiri-win from before flow control).
         frame(&mut to_bridge, OPEN, 1, &[]);
-        assert_eq!(
-            outcomes(&mut from_bridge, 1)[&1],
-            Err("no engine here".to_owned())
-        );
+        assert_eq!(outcomes(&mut from_bridge, 1)[&1], Err("no engine here".to_owned()));
         // Past LIMIT, had it been counted.
         let chunk = vec![0u8; 512 << 10];
         for _ in 0..(LIMIT / chunk.len() + 4) {
@@ -1209,12 +997,7 @@ mod tests {
                     // Handed on slowly, and acknowledged as kiri-win does.
                     std::thread::sleep(Duration::from_micros(200));
                     if got - acked >= ACK_EVERY {
-                        frame(
-                            &mut to_bridge,
-                            ACK,
-                            1,
-                            &((got - acked) as u32).to_be_bytes(),
-                        );
+                        frame(&mut to_bridge, ACK, 1, &((got - acked) as u32).to_be_bytes());
                         acked = got;
                     }
                 }

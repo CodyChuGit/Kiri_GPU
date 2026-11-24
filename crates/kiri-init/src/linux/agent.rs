@@ -45,11 +45,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
     // The published ports the kernel forwards, by container (on a Linux
     // host; in the VM, TCP ones reached over the NAT network).
     let mut published: Vec<(String, super::netlink::Dnat)> = Vec::new();
-    let host_dns = if host_process {
-        super::transport::host_dns()
-    } else {
-        Vec::new()
-    };
+    let host_dns = if host_process { super::transport::host_dns() } else { Vec::new() };
     let mut dhcp: Option<Dhcp> = if host_process {
         if let Err(e) = net::host_uplink() {
             eprintln!("kiri-init: no uplink: {e}");
@@ -65,11 +61,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
         }
     };
     // On a Linux host, SIGTERM or SIGINT stops the agent as Shutdown does.
-    let term = if host_process {
-        Some(term_signals()?)
-    } else {
-        None
-    };
+    let term = if host_process { Some(term_signals()?) } else { None };
     let mut bridges = Bridges::default();
     // In the VM, lookups the gateway's resolver fails go through the host.
     let mut dns = super::dns::Dns::default();
@@ -79,30 +71,18 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
     // that name to the bridge gateway and redirects nothing here, so the
     // listener would only be a port open to the LAN and a clash with any
     // host service on it.
-    let host_bound = if host_process {
-        None
-    } else {
-        Some(super::relay::listen_host_bound(net::HOST_RELAY_PORT)?)
-    };
+    let host_bound = if host_process { None } else { Some(super::relay::listen_host_bound(net::HOST_RELAY_PORT)?) };
     let framed = super::relay::listen_framed()?;
     let ssh_agent = super::relay::listen_ssh_agent()?;
     // The engine's API for containers that mount the docker socket (VM only).
     let engine_api = if host_process {
         None
     } else {
-        super::relay::listen_engine()
-            .inspect_err(|e| eprintln!("kiri-init: no engine socket for containers: {e}"))
-            .ok()
+        super::relay::listen_engine().inspect_err(|e| eprintln!("kiri-init: no engine socket for containers: {e}")).ok()
     };
     let copies = super::copy::listen()?;
     // USB passthrough (VM only: on a Linux host containers see the host's devices).
-    let usb = if host_process {
-        None
-    } else {
-        super::usb::listen()
-            .inspect_err(|e| eprintln!("kiri-init: no USB passthrough: {e}"))
-            .ok()
-    };
+    let usb = if host_process { None } else { super::usb::listen().inspect_err(|e| eprintln!("kiri-init: no USB passthrough: {e}")).ok() };
     let udp = super::relay::listen_udp()?;
     let pressure = memory_pressure_trigger();
     let mut last_pressure = std::time::Instant::now() - std::time::Duration::from_secs(1);
@@ -123,84 +103,24 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
 
     loop {
         fds.clear();
-        fds.push(libc::pollfd {
-            fd: conn.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: sigfd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
+        fds.push(libc::pollfd { fd: conn.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: sigfd.as_raw_fd(), events: libc::POLLIN, revents: 0 });
         // Always present (fd -1 is ignored by poll), so process fds start at 3.
-        fds.push(libc::pollfd {
-            fd: dhcp.as_ref().map_or(-1, Dhcp::fd),
-            events: libc::POLLIN,
-            revents: 0,
-        });
+        fds.push(libc::pollfd { fd: dhcp.as_ref().map_or(-1, Dhcp::fd), events: libc::POLLIN, revents: 0 });
         for fd in dns.fds() {
-            fds.push(libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
+            fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
         }
-        fds.push(libc::pollfd {
-            fd: forward.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: framed.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: host_bound.as_ref().map_or(-1, |l| l.as_raw_fd()),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: ssh_agent.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: engine_api.as_ref().map_or(-1, |l| l.as_raw_fd()),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: copies.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: usb.as_ref().map_or(-1, |l| l.as_raw_fd()),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: udp.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: pressure.as_ref().map_or(-1, |f| f.as_raw_fd()),
-            events: libc::POLLPRI,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: term.as_ref().map_or(-1, |f| f.as_raw_fd()),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: usage_wake.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
+        fds.push(libc::pollfd { fd: forward.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: framed.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: host_bound.as_ref().map_or(-1, |l| l.as_raw_fd()), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: ssh_agent.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: engine_api.as_ref().map_or(-1, |l| l.as_raw_fd()), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: copies.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: usb.as_ref().map_or(-1, |l| l.as_raw_fd()), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: udp.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: pressure.as_ref().map_or(-1, |f| f.as_raw_fd()), events: libc::POLLPRI, revents: 0 });
+        fds.push(libc::pollfd { fd: term.as_ref().map_or(-1, |f| f.as_raw_fd()), events: libc::POLLIN, revents: 0 });
+        fds.push(libc::pollfd { fd: usage_wake.as_raw_fd(), events: libc::POLLIN, revents: 0 });
         super::copy::interest(&mut fds);
         for r in &relays {
             r.interest(&mut fds);
@@ -213,18 +133,10 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 continue;
             }
             for fd in [&p.run.stdout, &p.run.stderr].into_iter().flatten() {
-                fds.push(libc::pollfd {
-                    fd: fd.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
+                fds.push(libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 });
             }
             if let (Some(fd), false) = (&p.run.stdin, p.input.is_empty()) {
-                fds.push(libc::pollfd {
-                    fd: fd.as_raw_fd(),
-                    events: libc::POLLOUT,
-                    revents: 0,
-                });
+                fds.push(libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 });
             }
         }
         // SAFETY: `fds` is a valid array of pollfd of the given length.
@@ -260,13 +172,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 match d.on_readable() {
                     Ok(true) => {
                         if let Some(l) = &d.lease {
-                            eprintln!(
-                                "kiri-init: {} is {}/{} via {}",
-                                net::UPLINK,
-                                net::ip_str(l.ip),
-                                l.prefix,
-                                net::ip_str(l.gateway)
-                            );
+                            eprintln!("kiri-init: {} is {}/{} via {}", net::UPLINK, net::ip_str(l.ip), l.prefix, net::ip_str(l.gateway));
                         }
                     }
                     Ok(false) => {}
@@ -292,10 +198,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
             if pfd.fd == usage_wake.as_raw_fd() {
                 let mut sink = [0u8; 16];
                 // SAFETY: reading into a buffer we own from a descriptor we own.
-                while unsafe {
-                    libc::read(usage_wake.as_raw_fd(), sink.as_mut_ptr().cast(), sink.len())
-                } > 0
-                {}
+                while unsafe { libc::read(usage_wake.as_raw_fd(), sink.as_mut_ptr().cast(), sink.len()) } > 0 {}
                 while let Ok(lines) = usage_rx.try_recv() {
                     measuring = false;
                     out.clear();
@@ -337,11 +240,8 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 continue;
             }
             if pfd.fd == copies.as_raw_fd() {
-                let running: Vec<(&str, libc::pid_t)> = procs
-                    .iter()
-                    .filter(|(_, p)| p.run.container.is_none() && p.exited.is_none())
-                    .map(|(pid, p)| (p.run.id.as_str(), *pid))
-                    .collect();
+                let running: Vec<(&str, libc::pid_t)> =
+                    procs.iter().filter(|(_, p)| p.run.container.is_none() && p.exited.is_none()).map(|(pid, p)| (p.run.id.as_str(), *pid)).collect();
                 super::copy::accept(&copies, &running, paths);
                 continue;
             }
@@ -371,10 +271,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 continue;
             }
             if dns.owns(pfd.fd) {
-                let upstream = dhcp
-                    .as_ref()
-                    .and_then(|d| d.lease.as_ref())
-                    .map_or(&host_dns[..], |l| &l.dns);
+                let upstream = dhcp.as_ref().and_then(|d| d.lease.as_ref()).map_or(&host_dns[..], |l| &l.dns);
                 dns.on_readable(pfd.fd, upstream);
                 continue;
             }
@@ -383,33 +280,18 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 flush_input(&mut procs, pfd.fd, &mut conn, &mut out)?;
                 continue;
             }
-            let Some((pid, stream)) = owner(&procs, pfd.fd) else {
-                continue;
-            };
+            let Some((pid, stream)) = owner(&procs, pfd.fd) else { continue };
             let p = procs.get_mut(&pid).expect("owner found it");
-            let slot = if stream == Stream::Stdout {
-                &mut p.run.stdout
-            } else {
-                &mut p.run.stderr
-            };
+            let slot = if stream == Stream::Stdout { &mut p.run.stdout } else { &mut p.run.stderr };
             let fd = slot.as_ref().expect("polled fd is open").as_raw_fd();
             // SAFETY: reading into a buffer we own from a descriptor we own.
             let got = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
             if got > 0 {
                 p.tty_hup = None;
                 out.clear();
-                Msg::Output {
-                    id: &p.run.id,
-                    stream,
-                    data: &chunk[..got as usize],
-                }
-                .encode(&mut out);
+                Msg::Output { id: &p.run.id, stream, data: &chunk[..got as usize] }.encode(&mut out);
                 conn.write_all(&out)?;
-            } else if got < 0
-                && p.run.tty
-                && p.exited.is_none()
-                && io::Error::last_os_error().raw_os_error() == Some(libc::EIO)
-            {
+            } else if got < 0 && p.run.tty && p.exited.is_none() && io::Error::last_os_error().raw_os_error() == Some(libc::EIO) {
                 // Nobody holds the terminal right now, but the process lives
                 // and may open it again (systemd does): keep it.
                 p.tty_hup = Some(std::time::Instant::now());
@@ -471,70 +353,33 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     let (mem_total_kib, mem_available_kib) = meminfo();
                     let agent_rss_kib = self_rss_kib();
                     let (mem_stall, oom_kills) = super::cgroup::memory_trouble();
-                    Msg::Stats(Stats {
-                        uptime_ns: sys::boottime_ns(),
-                        mem_total_kib,
-                        mem_available_kib,
-                        agent_rss_kib,
-                        mem_used_kib: held_kib(paths, agent_rss_kib),
-                        mem_stall,
-                        oom_kills,
-                    })
-                    .encode(&mut out)
+                    Msg::Stats(Stats { uptime_ns: sys::boottime_ns(), mem_total_kib, mem_available_kib, agent_rss_kib, mem_used_kib: held_kib(paths, agent_rss_kib), mem_stall, oom_kills })
+                        .encode(&mut out)
                 }
-                Ok(Msg::LayerQuery(digest)) => {
-                    Msg::LayerStatus(layers::present(&paths.layers, digest)).encode(&mut out)
-                }
+                Ok(Msg::LayerQuery(digest)) => Msg::LayerStatus(layers::present(&paths.layers, digest)).encode(&mut out),
                 // The blob follows the frame on the same stream.
-                Ok(Msg::LayerBegin(begin)) => {
-                    match layers::receive(&mut conn, &begin, &paths.layers) {
-                        Ok(stored) => Msg::LayerStored(stored).encode(&mut out),
-                        Err(e) => {
-                            Msg::Error(&format!("unpack {}: {e}", begin.digest)).encode(&mut out)
-                        }
-                    }
-                }
+                Ok(Msg::LayerBegin(begin)) => match layers::receive(&mut conn, &begin, &paths.layers) {
+                    Ok(stored) => Msg::LayerStored(stored).encode(&mut out),
+                    Err(e) => Msg::Error(&format!("unpack {}: {e}", begin.digest)).encode(&mut out),
+                },
                 Ok(Msg::Run(spec)) => match {
                     // A container that wants the network must not start before the
                     // VM has it: right after boot the DHCP lease can be a few
                     // hundred milliseconds away.
-                    if spec.flags
-                        & (kiri_proto::run_flags::NET_NONE | kiri_proto::run_flags::NET_HOST)
-                        == 0
-                    {
+                    if spec.flags & (kiri_proto::run_flags::NET_NONE | kiri_proto::run_flags::NET_HOST) == 0 {
                         wait_for_lease(&mut dhcp, std::time::Duration::from_secs(3));
                     }
-                    let join_pid =
-                        kiri_proto::net_opts::values(spec.net.opts, kiri_proto::net_opts::NETNS)
-                            .next()
-                            .and_then(|t| running_pid(&procs, t));
+                    let join_pid = kiri_proto::net_opts::values(spec.net.opts, kiri_proto::net_opts::NETNS).next().and_then(|t| running_pid(&procs, t));
                     container::spawn(
-                        &spec,
-                        paths,
-                        NetCtx {
-                            bridges: &mut bridges,
-                            dns: &mut dns,
-                            upstream_dns: dhcp
-                                .as_ref()
-                                .and_then(|d| d.lease.as_ref())
-                                .map_or(&host_dns[..], |l| &l.dns),
-                            join_pid,
-                        },
-                    )
+                    &spec,
+                    paths,
+                    NetCtx { bridges: &mut bridges, dns: &mut dns, upstream_dns: dhcp.as_ref().and_then(|d| d.lease.as_ref()).map_or(&host_dns[..], |l| &l.dns), join_pid },
+                )
                 } {
                     Ok(run) => {
                         let cloned_ns = sys::boottime_ns();
-                        Msg::Started {
-                            id: &run.id,
-                            pid: run.pid as u32,
-                        }
-                        .encode(&mut out);
-                        admit(
-                            &mut conn,
-                            &mut dns,
-                            &mut procs,
-                            new_proc(run, received_ns, cloned_ns),
-                        )?;
+                        Msg::Started { id: &run.id, pid: run.pid as u32 }.encode(&mut out);
+                        admit(&mut conn, &mut dns, &mut procs, new_proc(run, received_ns, cloned_ns))?;
                     }
                     Err(e) => Msg::Error(&format!("run {}: {e}", spec.id)).encode(&mut out),
                 },
@@ -542,35 +387,16 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     // Its namespaces are entered through /proc/<pid>: only a
                     // container still running, never one exited under a freed pid.
                     // The container's own seccomp profile goes with it, if it has one.
-                    match running_pid(&procs, spec.container_id)
-                        .and_then(|pid| procs.get(&pid).map(|p| (pid, p.run.seccomp.clone())))
-                    {
-                        None => {
-                            Msg::Error(&format!("container {} is not running", spec.container_id))
-                                .encode(&mut out)
-                        }
-                        Some((pid, profile)) => {
-                            match container::exec(&spec, pid, paths, &profile) {
-                                Ok(run) => {
-                                    let cloned_ns = sys::boottime_ns();
-                                    Msg::Started {
-                                        id: &run.id,
-                                        pid: run.pid as u32,
-                                    }
-                                    .encode(&mut out);
-                                    admit(
-                                        &mut conn,
-                                        &mut dns,
-                                        &mut procs,
-                                        new_proc(run, received_ns, cloned_ns),
-                                    )?;
-                                }
-                                Err(e) => {
-                                    Msg::Error(&format!("exec in {}: {e}", spec.container_id))
-                                        .encode(&mut out)
-                                }
+                    match running_pid(&procs, spec.container_id).and_then(|pid| procs.get(&pid).map(|p| (pid, p.run.seccomp.clone()))) {
+                        None => Msg::Error(&format!("container {} is not running", spec.container_id)).encode(&mut out),
+                        Some((pid, profile)) => match container::exec(&spec, pid, paths, &profile) {
+                            Ok(run) => {
+                                let cloned_ns = sys::boottime_ns();
+                                Msg::Started { id: &run.id, pid: run.pid as u32 }.encode(&mut out);
+                                admit(&mut conn, &mut dns, &mut procs, new_proc(run, received_ns, cloned_ns))?;
                             }
-                        }
+                            Err(e) => Msg::Error(&format!("exec in {}: {e}", spec.container_id)).encode(&mut out),
+                        },
                     }
                 }
                 Ok(Msg::Input { id, data }) => {
@@ -605,10 +431,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     continue;
                 }
                 Ok(Msg::Resize { id, rows, cols }) => {
-                    if let Some(fd) = running(&procs, id)
-                        .filter(|p| p.run.tty)
-                        .and_then(|p| p.run.stdout.as_ref())
-                    {
+                    if let Some(fd) = running(&procs, id).filter(|p| p.run.tty).and_then(|p| p.run.stdout.as_ref()) {
                         sys::resize_pty(fd.as_raw_fd(), rows, cols);
                     }
                     continue;
@@ -629,32 +452,18 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 }
                 Ok(Msg::Publish(p)) => {
                     // In the VM: from the Mac over the NAT network, TCP only.
-                    let gateway = dhcp
-                        .as_ref()
-                        .and_then(|d| d.lease.as_ref())
-                        .map(|l| l.gateway);
+                    let gateway = dhcp.as_ref().and_then(|d| d.lease.as_ref()).map(|l| l.gateway);
                     if !host_process && (p.udp || gateway.is_none()) {
                         Msg::Error("published ports are relayed on this platform").encode(&mut out);
                     } else {
-                        let d = super::netlink::Dnat {
-                            udp: p.udp,
-                            host_ip: p.host_ip,
-                            host_port: p.host_port,
-                            to_ip: p.to_ip,
-                            to_port: p.to_port,
-                        };
+                        let d = super::netlink::Dnat { udp: p.udp, host_ip: p.host_ip, host_port: p.host_port, to_ip: p.to_ip, to_port: p.to_port };
                         published.push((p.id.to_owned(), d));
                         let all = published.iter().map(|(_, d)| *d).collect::<Vec<_>>();
-                        match if host_process {
-                            net::publish(&all)
-                        } else {
-                            net::publish_vm(&all, gateway.expect("checked"))
-                        } {
+                        match if host_process { net::publish(&all) } else { net::publish_vm(&all, gateway.expect("checked")) } {
                             Ok(()) => Msg::Ack.encode(&mut out),
                             Err(e) => {
                                 published.pop();
-                                Msg::Error(&format!("publish {}:{}: {e}", p.host_port, p.to_port))
-                                    .encode(&mut out)
+                                Msg::Error(&format!("publish {}:{}: {e}", p.host_port, p.to_port)).encode(&mut out)
                             }
                         }
                     }
@@ -664,15 +473,8 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     published.retain(|(i, _)| i != id);
                     if published.len() != before {
                         let all = published.iter().map(|(_, d)| *d).collect::<Vec<_>>();
-                        let gateway = dhcp
-                            .as_ref()
-                            .and_then(|d| d.lease.as_ref())
-                            .map_or([0; 4], |l| l.gateway);
-                        if let Err(e) = if host_process {
-                            net::publish(&all)
-                        } else {
-                            net::publish_vm(&all, gateway)
-                        } {
+                        let gateway = dhcp.as_ref().and_then(|d| d.lease.as_ref()).map_or([0; 4], |l| l.gateway);
+                        if let Err(e) = if host_process { net::publish(&all) } else { net::publish_vm(&all, gateway) } {
                             eprintln!("kiri-init: unpublish {id}: {e}");
                         }
                     }
@@ -683,23 +485,12 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     // seconds. The lines follow as a `Usage` message.
                     if !measuring {
                         measuring = true;
-                        let (layers, containers, tx, ring) = (
-                            paths.layers.clone(),
-                            paths.containers.clone(),
-                            usage_tx.clone(),
-                            usage_ring.clone(),
-                        );
-                        let _ = std::thread::Builder::new()
-                            .name("usage".into())
-                            .spawn(move || {
-                                let _ = tx.send(super::usage::measure(
-                                    &layers,
-                                    &containers,
-                                    Path::new(container::VOLUMES),
-                                ));
-                                // SAFETY: writing one byte from a buffer we own to a descriptor we own.
-                                unsafe { libc::write(ring.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
-                            });
+                        let (layers, containers, tx, ring) = (paths.layers.clone(), paths.containers.clone(), usage_tx.clone(), usage_ring.clone());
+                        let _ = std::thread::Builder::new().name("usage".into()).spawn(move || {
+                            let _ = tx.send(super::usage::measure(&layers, &containers, Path::new(container::VOLUMES)));
+                            // SAFETY: writing one byte from a buffer we own to a descriptor we own.
+                            unsafe { libc::write(ring.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+                        });
                     }
                     continue;
                 }
@@ -734,10 +525,7 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     // the Mac wakes: stepped only when off by more than a
                     // quarter second, so the clock is not nudged back and forth.
                     if !host_process && clock_off(ns) {
-                        let ts = libc::timespec {
-                            tv_sec: (ns / 1_000_000_000) as _,
-                            tv_nsec: (ns % 1_000_000_000) as _,
-                        };
+                        let ts = libc::timespec { tv_sec: (ns / 1_000_000_000) as _, tv_nsec: (ns % 1_000_000_000) as _ };
                         // SAFETY: `ts` is a valid timespec.
                         unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
                     }
@@ -771,52 +559,24 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     }
                     None => Msg::Error(&format!("container {id} is not running")).encode(&mut out),
                 },
-                Ok(Msg::UsbNodesQuery) => {
-                    kiri_proto::encode_usb_nodes(&mut out, &super::usb::nodes())
-                }
+                Ok(Msg::UsbNodesQuery) => kiri_proto::encode_usb_nodes(&mut out, &super::usb::nodes()),
                 Ok(Msg::ListenQuery { id }) => match running_pid(&procs, id) {
                     Some(pid) => kiri_proto::encode_listening(&mut out, &net::listening(pid)),
                     None => Msg::Error(&format!("container {id} is not running")).encode(&mut out),
                 },
                 Ok(Msg::NetAttach { id, ifname, net: n }) => match running_pid(&procs, id) {
                     Some(pid) => {
-                        let num: u32 = ifname
-                            .strip_prefix("eth")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1);
+                        let num: u32 = ifname.strip_prefix("eth").and_then(|v| v.parse().ok()).unwrap_or(1);
                         let host_if = extra_veth(id, num);
                         // A previous run's veth can outlive its namespace for a moment;
                         // the name is this container's own, so it can go.
                         let _ = net::detach(&host_if);
-                        let mac = kiri_proto::net_opts::values(n.opts, kiri_proto::net_opts::MAC)
-                            .next()
-                            .and_then(net::parse_mac);
+                        let mac = kiri_proto::net_opts::values(n.opts, kiri_proto::net_opts::MAC).next().and_then(net::parse_mac);
                         let v6 = net::Ip6::from_opts(n.opts);
                         let plug = net::Plug::from_opts(n.opts);
-                        let attached = net::attach(
-                            &mut bridges,
-                            n.bridge,
-                            &host_if,
-                            pid,
-                            num,
-                            n.ip,
-                            n.prefix,
-                            n.gateway,
-                            mac,
-                            v6,
-                            plug,
-                        )
-                        .and_then(|()| {
-                            if plug.no_ipv4 {
-                                Ok(())
-                            } else {
-                                dns.serve(n.bridge, n.gateway)
-                            }
-                        })
-                        .and_then(|()| {
-                            std::fs::File::open(format!("/proc/{pid}/ns/net"))
-                                .and_then(|ns| dns.serve_in(&ns, pid, n.ip, n.bridge))
-                        });
+                        let attached = net::attach(&mut bridges, n.bridge, &host_if, pid, num, n.ip, n.prefix, n.gateway, mac, v6, plug)
+                            .and_then(|()| if plug.no_ipv4 { Ok(()) } else { dns.serve(n.bridge, n.gateway) })
+                            .and_then(|()| std::fs::File::open(format!("/proc/{pid}/ns/net")).and_then(|ns| dns.serve_in(&ns, pid, n.ip, n.bridge)));
                         match attached {
                             Ok(()) => {
                                 if !plug.no_ipv4 {
@@ -837,40 +597,21 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                     None => Msg::Error(&format!("container {id} is not running")).encode(&mut out),
                 },
                 Ok(Msg::UplinkQuery) => match dhcp.as_ref().and_then(|d| d.lease.as_ref()) {
-                    Some(l) => Msg::Uplink {
-                        ip: l.ip,
-                        gateway: l.gateway,
-                    }
-                    .encode(&mut out),
+                    Some(l) => Msg::Uplink { ip: l.ip, gateway: l.gateway }.encode(&mut out),
                     None => Msg::Error("no uplink lease").encode(&mut out),
                 },
-                Ok(Msg::Route {
-                    dst,
-                    prefix,
-                    via,
-                    add,
-                }) => match net::route(dst, prefix, via, add) {
+                Ok(Msg::Route { dst, prefix, via, add }) => match net::route(dst, prefix, via, add) {
                     Ok(()) => Msg::Ack.encode(&mut out),
                     Err(e) => Msg::Error(&format!("route: {e}")).encode(&mut out),
                 },
-                Ok(Msg::NetDetach {
-                    id,
-                    ifname,
-                    bridge,
-                    ip,
-                }) => match running_pid(&procs, id) {
+                Ok(Msg::NetDetach { id, ifname, bridge, ip }) => match running_pid(&procs, id) {
                     Some(pid) => {
-                        let num: u32 = ifname
-                            .strip_prefix("eth")
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(1);
+                        let num: u32 = ifname.strip_prefix("eth").and_then(|v| v.parse().ok()).unwrap_or(1);
                         dns.unregister(bridge, ip);
                         dns.leave(pid, bridge);
                         let host_if = extra_veth(id, num);
                         if let Some(p) = procs.get_mut(&pid) {
-                            p.run
-                                .dns_entries
-                                .retain(|(b, a)| !(b == bridge && *a == ip));
+                            p.run.dns_entries.retain(|(b, a)| !(b == bridge && *a == ip));
                             p.run.veths.retain(|v| *v != host_if);
                         }
                         match net::detach(&host_if) {
@@ -893,28 +634,18 @@ pub fn serve(mut conn: File, paths: &Paths) -> io::Result<()> {
                 Ok(Msg::FsListRequest { id, path }) => match running_rootfs(&procs, paths, id) {
                     Some(root) => match super::fsview::list(&root, path) {
                         Ok(list) => {
-                            let entries: Vec<_> = list
-                                .iter()
-                                .map(|(n, m)| super::fsview::entry(n, *m))
-                                .collect();
+                            let entries: Vec<_> = list.iter().map(|(n, m)| super::fsview::entry(n, *m)).collect();
                             kiri_proto::encode_fs_list(&mut out, &entries)
                         }
                         Err(e) => Msg::Error(&format!("list {path}: {e}")).encode(&mut out),
                     },
                     None => Msg::Error(&format!("container {id} is not running")).encode(&mut out),
                 },
-                Ok(Msg::FsRead {
-                    id,
-                    path,
-                    offset,
-                    len,
-                }) => match running_rootfs(&procs, paths, id) {
-                    Some(root) => {
-                        match super::fsview::read(&root, path, offset, len as usize, &mut fs_buf) {
-                            Ok(()) => Msg::FsData(&fs_buf).encode(&mut out),
-                            Err(e) => Msg::Error(&format!("read {path}: {e}")).encode(&mut out),
-                        }
-                    }
+                Ok(Msg::FsRead { id, path, offset, len }) => match running_rootfs(&procs, paths, id) {
+                    Some(root) => match super::fsview::read(&root, path, offset, len as usize, &mut fs_buf) {
+                        Ok(()) => Msg::FsData(&fs_buf).encode(&mut out),
+                        Err(e) => Msg::Error(&format!("read {path}: {e}")).encode(&mut out),
+                    },
                     None => Msg::Error(&format!("container {id} is not running")).encode(&mut out),
                 },
                 Ok(other) => Msg::Error(&format!("unexpected {other:?}")).encode(&mut out),
@@ -934,16 +665,10 @@ fn wait_for_lease(dhcp: &mut Option<Dhcp>, max: std::time::Duration) {
     while d.lease.is_none() {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            eprintln!(
-                "kiri-init: no DHCP lease yet; starting the container without waiting longer"
-            );
+            eprintln!("kiri-init: no DHCP lease yet; starting the container without waiting longer");
             return;
         }
-        let mut pfd = libc::pollfd {
-            fd: d.fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
+        let mut pfd = libc::pollfd { fd: d.fd(), events: libc::POLLIN, revents: 0 };
         let wait = (d.timeout_ms().max(0) as u128).min(left.as_millis()) as libc::c_int;
         // SAFETY: one valid pollfd.
         unsafe { libc::poll(&mut pfd, 1, wait.max(1)) };
@@ -955,21 +680,14 @@ fn wait_for_lease(dhcp: &mut Option<Dhcp>, max: std::time::Duration) {
 }
 
 fn memory_pressure_trigger() -> Option<std::fs::File> {
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/proc/pressure/memory")
-        .ok()?;
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open("/proc/pressure/memory").ok()?;
     f.write_all(b"some 50000 500000\0").ok()?;
     Some(f)
 }
 
 /// A running container's init (not an exec).
 fn running_pid(procs: &HashMap<libc::pid_t, Proc>, id: &str) -> Option<libc::pid_t> {
-    procs
-        .iter()
-        .find(|(_, p)| p.run.container.is_none() && p.run.id == id && p.exited.is_none())
-        .map(|(pid, _)| *pid)
+    procs.iter().find(|(_, p)| p.run.container.is_none() && p.run.id == id && p.exited.is_none()).map(|(pid, _)| *pid)
 }
 
 /// The host side of a container's `eth{n}` for n > 0: 15 characters at most.
@@ -982,46 +700,21 @@ fn extra_veth(id: &str, n: u32) -> String {
 /// and bind mounts, as `docker cp` reads a running container: those are
 /// mounted only in its mount namespace, so the overlay the agent mounted
 /// shows their folders empty (#317). Its init just exited: that overlay.
-fn running_rootfs(
-    procs: &HashMap<libc::pid_t, Proc>,
-    paths: &Paths,
-    id: &str,
-) -> Option<std::path::PathBuf> {
+fn running_rootfs(procs: &HashMap<libc::pid_t, Proc>, paths: &Paths, id: &str) -> Option<std::path::PathBuf> {
     if let Some(pid) = running_pid(procs, id) {
         return Some(std::path::PathBuf::from(format!("/proc/{pid}/root")));
     }
-    procs
-        .values()
-        .any(|p| p.run.container.is_none() && p.run.id == id)
-        .then(|| paths.containers.join(id).join("rootfs"))
+    procs.values().any(|p| p.run.container.is_none() && p.run.id == id).then(|| paths.containers.join(id).join("rootfs"))
 }
 
 fn new_proc(run: Process, received_ns: u64, cloned_ns: u64) -> Proc {
-    Proc {
-        run,
-        received_ns,
-        cloned_ns,
-        exited: None,
-        input: VecDeque::new(),
-        close_stdin_when_drained: false,
-        tty_hup: None,
-    }
+    Proc { run, received_ns, cloned_ns, exited: None, input: VecDeque::new(), close_stdin_when_drained: false, tty_hup: None }
 }
 
 /// Writes as much pending input as the process will take without blocking,
 /// and tells the host how much, so it can send that much more.
-fn flush_input(
-    procs: &mut HashMap<libc::pid_t, Proc>,
-    fd: RawFd,
-    conn: &mut File,
-    out: &mut Vec<u8>,
-) -> io::Result<()> {
-    let Some(p) = procs
-        .values_mut()
-        .find(|p| p.run.stdin.as_ref().is_some_and(|f| f.as_raw_fd() == fd))
-    else {
-        return Ok(());
-    };
+fn flush_input(procs: &mut HashMap<libc::pid_t, Proc>, fd: RawFd, conn: &mut File, out: &mut Vec<u8>) -> io::Result<()> {
+    let Some(p) = procs.values_mut().find(|p| p.run.stdin.as_ref().is_some_and(|f| f.as_raw_fd() == fd)) else { return Ok(()) };
     let mut consumed = 0usize;
     while !p.input.is_empty() {
         let (front, _) = p.input.as_slices();
@@ -1044,11 +737,7 @@ fn flush_input(
     }
     if consumed > 0 {
         out.clear();
-        Msg::InputConsumed {
-            id: &p.run.id,
-            bytes: consumed as u32,
-        }
-        .encode(out);
+        Msg::InputConsumed { id: &p.run.id, bytes: consumed as u32 }.encode(out);
         conn.write_all(out)?;
     }
     Ok(())
@@ -1070,13 +759,8 @@ fn held_kib(paths: &Paths, agent_rss_kib: u64) -> u64 {
 
 fn self_rss_kib() -> u64 {
     let mut buf = [0u8; 128];
-    let n = std::fs::File::open("/proc/self/statm")
-        .and_then(|mut f| f.read(&mut buf))
-        .unwrap_or(0);
-    let pages: u64 = std::str::from_utf8(&buf[..n])
-        .ok()
-        .and_then(|s| s.split_whitespace().nth(1)?.parse().ok())
-        .unwrap_or(0);
+    let n = std::fs::File::open("/proc/self/statm").and_then(|mut f| f.read(&mut buf)).unwrap_or(0);
+    let pages: u64 = std::str::from_utf8(&buf[..n]).ok().and_then(|s| s.split_whitespace().nth(1)?.parse().ok()).unwrap_or(0);
     // SAFETY: sysconf takes no pointers.
     pages * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64 / 1024
 }
@@ -1084,9 +768,7 @@ fn self_rss_kib() -> u64 {
 /// Whether the guest's clock is more than a quarter second from `ns`
 /// (Unix nanoseconds, the host's time).
 fn clock_off(ns: u64) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
     off_by_more(now, ns, 250_000_000)
 }
 
@@ -1098,11 +780,7 @@ fn off_by_more(a: u64, b: u64, limit: u64) -> bool {
 fn read_frame(conn: &mut File, buf: &mut Vec<u8>) -> io::Result<bool> {
     buf.resize(4, 0);
     if let Err(e) = conn.read_exact(&mut buf[..4]) {
-        return if e.kind() == io::ErrorKind::UnexpectedEof {
-            Ok(false)
-        } else {
-            Err(e)
-        };
+        return if e.kind() == io::ErrorKind::UnexpectedEof { Ok(false) } else { Err(e) };
     }
     let len = kiri_proto::frame_len(buf[..4].try_into().expect("4 bytes"))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
@@ -1130,14 +808,8 @@ fn child_signals() -> io::Result<OwnedFd> {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
         libc::sigaddset(&mut set, libc::SIGCHLD);
-        sys::check(
-            libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) as _,
-            "sigprocmask",
-        )?;
-        let fd = sys::check(
-            libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) as _,
-            "signalfd",
-        )?;
+        sys::check(libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) as _, "sigprocmask")?;
+        let fd = sys::check(libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) as _, "signalfd")?;
         Ok(OwnedFd::from_raw_fd(fd as RawFd))
     }
 }
@@ -1173,10 +845,7 @@ fn term_signals() -> io::Result<OwnedFd> {
     // SAFETY: plain pipe2 and sigaction; the handler only calls write(2),
     // which is async-signal-safe, on a descriptor that is never closed.
     unsafe {
-        sys::check(
-            libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) as _,
-            "pipe",
-        )?;
+        sys::check(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) as _, "pipe")?;
         TERM_PIPE.store(fds[1], std::sync::atomic::Ordering::SeqCst);
         AGENT_PID.store(libc::getpid(), std::sync::atomic::Ordering::SeqCst);
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -1184,10 +853,7 @@ fn term_signals() -> io::Result<OwnedFd> {
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut sa.sa_mask);
         for sig in [libc::SIGTERM, libc::SIGINT] {
-            sys::check(
-                libc::sigaction(sig, &sa, std::ptr::null_mut()) as _,
-                "sigaction",
-            )?;
+            sys::check(libc::sigaction(sig, &sa, std::ptr::null_mut()) as _, "sigaction")?;
         }
         Ok(OwnedFd::from_raw_fd(fds[0]))
     }
@@ -1203,11 +869,7 @@ extern "C" fn on_term(_: libc::c_int) {
     // SAFETY: getpid and write(2) are async-signal-safe.
     unsafe {
         if libc::getpid() == AGENT_PID.load(std::sync::atomic::Ordering::SeqCst) {
-            libc::write(
-                TERM_PIPE.load(std::sync::atomic::Ordering::SeqCst),
-                b"t".as_ptr().cast(),
-                1,
-            );
+            libc::write(TERM_PIPE.load(std::sync::atomic::Ordering::SeqCst), b"t".as_ptr().cast(), 1);
         }
     }
 }
@@ -1221,26 +883,12 @@ fn drain_signals(fd: &OwnedFd) {
 /// Reports an exited process to the host, then tears it down. `listener`:
 /// whether its 127.0.0.11 server goes too (not when `admit` evicts it: the
 /// server under that pid may be the new process's by then).
-fn finish(
-    conn: &mut File,
-    dns: &mut super::dns::Dns,
-    procs: &HashMap<libc::pid_t, Proc>,
-    p: Proc,
-    listener: bool,
-) -> io::Result<()> {
-    let (code, reaped_ns) = p
-        .exited
-        .unwrap_or((128 + libc::SIGKILL, sys::boottime_ns()));
+fn finish(conn: &mut File, dns: &mut super::dns::Dns, procs: &HashMap<libc::pid_t, Proc>, p: Proc, listener: bool) -> io::Result<()> {
+    let (code, reaped_ns) = p.exited.unwrap_or((128 + libc::SIGKILL, sys::boottime_ns()));
     let mut out = Vec::new();
     let oom_killed = container::oom_killed(&p.run);
-    Msg::Exited(Exited {
-        id: &p.run.id,
-        code,
-        setup_ns: p.cloned_ns - p.received_ns,
-        run_ns: reaped_ns - p.cloned_ns,
-        oom_killed,
-    })
-    .encode(&mut out);
+    Msg::Exited(Exited { id: &p.run.id, code, setup_ns: p.cloned_ns - p.received_ns, run_ns: reaped_ns - p.cloned_ns, oom_killed })
+        .encode(&mut out);
     conn.write_all(&out)?;
     for (bridge, ip) in &p.run.dns_entries {
         dns.unregister(bridge, *ip);
@@ -1250,10 +898,7 @@ fn finish(
     }
     // A container still running in its network namespace keeps that
     // alive (its execs went with its PID namespace and count as 0).
-    let shared = p.run.netns != 0
-        && procs
-            .values()
-            .any(|o| o.exited.is_none() && o.run.netns == p.run.netns);
+    let shared = p.run.netns != 0 && procs.values().any(|o| o.exited.is_none() && o.run.netns == p.run.netns);
     container::teardown(&p.run, shared);
     Ok(())
 }
@@ -1263,20 +908,12 @@ fn finish(
 /// replaced silently, its exit was never reported (a `docker wait` or exec
 /// hung) and its mounts, cgroup and DNS names stayed (#324). It is
 /// finished first, with the output it still has buffered.
-fn admit(
-    conn: &mut File,
-    dns: &mut super::dns::Dns,
-    procs: &mut HashMap<libc::pid_t, Proc>,
-    new: Proc,
-) -> io::Result<()> {
+fn admit(conn: &mut File, dns: &mut super::dns::Dns, procs: &mut HashMap<libc::pid_t, Proc>, new: Proc) -> io::Result<()> {
     let pid = new.run.pid;
     if let Some(mut old) = procs.remove(&pid) {
         let mut chunk = vec![0u8; MAX_OUTPUT_CHUNK];
         let mut out = Vec::new();
-        for (stream, fd) in [
-            (Stream::Stdout, old.run.stdout.take()),
-            (Stream::Stderr, old.run.stderr.take()),
-        ] {
+        for (stream, fd) in [(Stream::Stdout, old.run.stdout.take()), (Stream::Stderr, old.run.stderr.take())] {
             let Some(fd) = fd else { continue };
             // Only what is in the pipe already. A process the old one left
             // behind in a session of its own can still hold the write end:
@@ -1287,18 +924,12 @@ fn admit(
             loop {
                 // SAFETY: reading into a buffer we own from a descriptor we
                 // own, made non-blocking just above.
-                let got =
-                    unsafe { libc::read(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), chunk.len()) };
+                let got = unsafe { libc::read(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), chunk.len()) };
                 if got <= 0 {
                     break;
                 }
                 out.clear();
-                Msg::Output {
-                    id: &old.run.id,
-                    stream,
-                    data: &chunk[..got as usize],
-                }
-                .encode(&mut out);
+                Msg::Output { id: &old.run.id, stream, data: &chunk[..got as usize] }.encode(&mut out);
                 conn.write_all(&out)?;
             }
         }
@@ -1313,9 +944,7 @@ fn admit(
 /// restart, under the same id as the new one): signalling it could reach
 /// another process, and would miss the running container (#324).
 fn running<'a>(procs: &'a HashMap<libc::pid_t, Proc>, id: &str) -> Option<&'a Proc> {
-    procs
-        .values()
-        .find(|p| p.run.id == id && p.exited.is_none())
+    procs.values().find(|p| p.run.id == id && p.exited.is_none())
 }
 
 fn reap(procs: &mut HashMap<libc::pid_t, Proc>) {
@@ -1359,10 +988,7 @@ mod running_tests {
             let mut old = new_proc(Process::for_test("c1", 100), 0, 0);
             old.exited = Some((0, 0));
             procs.insert(100, old);
-            assert!(
-                running(&procs, "c1").is_none(),
-                "only an exited run: nothing to signal"
-            );
+            assert!(running(&procs, "c1").is_none(), "only an exited run: nothing to signal");
             assert_eq!(running_pid(&procs, "c1"), None, "nor to exec into");
             procs.insert(200, new_proc(Process::for_test("c1", 200), 0, 0));
             assert_eq!(running(&procs, "c1").map(|p| p.run.pid), Some(200));
@@ -1376,12 +1002,7 @@ mod running_tests {
         // SAFETY: pipe2 fills two descriptors we then own.
         assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
         // SAFETY: both were just opened and are owned by nobody else.
-        unsafe {
-            (
-                std::fs::File::from_raw_fd(fds[0]),
-                std::fs::File::from_raw_fd(fds[1]),
-            )
-        }
+        unsafe { (std::fs::File::from_raw_fd(fds[0]), std::fs::File::from_raw_fd(fds[1])) }
     }
 
     #[test]
@@ -1400,39 +1021,17 @@ mod running_tests {
         old.exited = Some((3, 0));
         procs.insert(100, old);
 
-        super::admit(
-            &mut conn,
-            &mut dns,
-            &mut procs,
-            new_proc(Process::for_test("new", 100), 0, 0),
-        )
-        .unwrap();
+        super::admit(&mut conn, &mut dns, &mut procs, new_proc(Process::for_test("new", 100), 0, 0)).unwrap();
         drop(conn);
 
         assert_eq!(procs.len(), 1);
         assert_eq!(procs[&100].run.id, "new");
         let mut frame = Vec::new();
         assert!(super::read_frame(&mut host, &mut frame).unwrap());
-        assert!(
-            matches!(
-                kiri_proto::decode(&frame),
-                Ok(Msg::Output {
-                    id: "old",
-                    data: b"bye",
-                    ..
-                })
-            ),
-            "its last output first"
-        );
+        assert!(matches!(kiri_proto::decode(&frame), Ok(Msg::Output { id: "old", data: b"bye", .. })), "its last output first");
         assert!(super::read_frame(&mut host, &mut frame).unwrap());
-        assert!(
-            matches!(kiri_proto::decode(&frame), Ok(Msg::Exited(e)) if e.id == "old" && e.code == 3),
-            "then its exit"
-        );
-        assert!(
-            !super::read_frame(&mut host, &mut frame).unwrap(),
-            "nothing about the new one"
-        );
+        assert!(matches!(kiri_proto::decode(&frame), Ok(Msg::Exited(e)) if e.id == "old" && e.code == 3), "then its exit");
+        assert!(!super::read_frame(&mut host, &mut frame).unwrap(), "nothing about the new one");
     }
 
     /// A process the old one left behind, in a session of its own, can keep
@@ -1454,26 +1053,11 @@ mod running_tests {
             old.run.stdout = Some(out_r);
             old.exited = Some((3, 0));
             procs.insert(100, old);
-            super::admit(
-                &mut conn,
-                &mut dns,
-                &mut procs,
-                new_proc(Process::for_test("new", 100), 0, 0),
-            )
-            .unwrap();
+            super::admit(&mut conn, &mut dns, &mut procs, new_proc(Process::for_test("new", 100), 0, 0)).unwrap();
             drop(conn);
             let mut frame = Vec::new();
-            let last_words = super::read_frame(&mut host, &mut frame).unwrap()
-                && matches!(
-                    kiri_proto::decode(&frame),
-                    Ok(Msg::Output {
-                        id: "old",
-                        data: b"bye",
-                        ..
-                    })
-                );
-            let exit = super::read_frame(&mut host, &mut frame).unwrap()
-                && matches!(kiri_proto::decode(&frame), Ok(Msg::Exited(e)) if e.id == "old" && e.code == 3);
+            let last_words = super::read_frame(&mut host, &mut frame).unwrap() && matches!(kiri_proto::decode(&frame), Ok(Msg::Output { id: "old", data: b"bye", .. }));
+            let exit = super::read_frame(&mut host, &mut frame).unwrap() && matches!(kiri_proto::decode(&frame), Ok(Msg::Exited(e)) if e.id == "old" && e.code == 3);
             let _ = done.send((last_words, exit, procs[&100].run.id.clone()));
         });
         let got = waited.recv_timeout(std::time::Duration::from_secs(5));
@@ -1481,11 +1065,7 @@ mod running_tests {
         // so the thread can be joined whatever happened.
         drop(held);
         thread.join().unwrap();
-        assert_eq!(
-            got,
-            Ok((true, true, "new".to_owned())),
-            "the old one's last output and exit go out, and nothing waits for the pipe to close"
-        );
+        assert_eq!(got, Ok((true, true, "new".to_owned())), "the old one's last output and exit go out, and nothing waits for the pipe to close");
     }
 }
 
@@ -1509,10 +1089,7 @@ mod clock_tests {
 fn usage_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     // SAFETY: `fds` has room for the two descriptors pipe2 writes.
-    sys::check(
-        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } as _,
-        "pipe",
-    )?;
+    sys::check(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } as _, "pipe")?;
     // SAFETY: pipe2 just opened both; nothing else owns them.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }

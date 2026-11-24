@@ -30,23 +30,10 @@ struct OpenHow {
 /// Opens `path` under `root`, every symlink resolved inside `root`.
 pub(super) fn open_in(root: RawFd, path: &str, flags: i32) -> io::Result<OwnedFd> {
     let rel = path.trim_start_matches('/');
-    let c = CString::new(if rel.is_empty() { "." } else { rel })
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let how = OpenHow {
-        flags: (flags | libc::O_CLOEXEC) as u64,
-        mode: 0,
-        resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
-    };
+    let c = CString::new(if rel.is_empty() { "." } else { rel }).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let how = OpenHow { flags: (flags | libc::O_CLOEXEC) as u64, mode: 0, resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS };
     // SAFETY: openat2 with a valid dirfd, path and open_how of the stated size.
-    let fd = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            root,
-            c.as_ptr(),
-            &how as *const OpenHow,
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
+    let fd = unsafe { libc::syscall(libc::SYS_openat2, root, c.as_ptr(), &how as *const OpenHow, std::mem::size_of::<OpenHow>()) };
     sys::check(fd, "open")?;
     // SAFETY: openat2 returned a fresh descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
@@ -55,12 +42,7 @@ pub(super) fn open_in(root: RawFd, path: &str, flags: i32) -> io::Result<OwnedFd
 fn root_of(rootfs: &Path) -> io::Result<OwnedFd> {
     let c = sys::cstr(rootfs)?;
     // SAFETY: plain open of a directory; owned right away.
-    let fd = unsafe {
-        libc::open(
-            c.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
     sys::check(fd as _, "open rootfs")?;
     // SAFETY: fresh descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -78,13 +60,7 @@ pub struct Meta {
 
 impl From<&libc::stat> for Meta {
     fn from(st: &libc::stat) -> Meta {
-        Meta {
-            mode: st.st_mode,
-            size: st.st_size as u64,
-            mtime: st.st_mtime,
-            mtime_nsec: st.st_mtime_nsec as u32,
-            ino: st.st_ino,
-        }
+        Meta { mode: st.st_mode, size: st.st_size as u64, mtime: st.st_mtime, mtime_nsec: st.st_mtime_nsec as u32, ino: st.st_ino }
     }
 }
 
@@ -117,20 +93,10 @@ pub fn list(rootfs: &Path, path: &str) -> io::Result<Vec<(String, Meta)>> {
     for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(c) = CString::new(name.as_str()) else {
-            continue;
-        };
+        let Ok(c) = CString::new(name.as_str()) else { continue };
         // SAFETY: fstatat relative to the resolved directory, not following links.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe {
-            libc::fstatat(
-                dir.as_raw_fd(),
-                c.as_ptr(),
-                &mut st,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } != 0
-        {
+        if unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
             continue;
         }
         if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
@@ -154,43 +120,20 @@ pub fn list(rootfs: &Path, path: &str) -> io::Result<Vec<(String, Meta)>> {
 }
 
 /// Up to `len` bytes from `offset` of a regular file.
-pub fn read(
-    rootfs: &Path,
-    path: &str,
-    offset: u64,
-    len: usize,
-    buf: &mut Vec<u8>,
-) -> io::Result<()> {
+pub fn read(rootfs: &Path, path: &str, offset: u64, len: usize, buf: &mut Vec<u8>) -> io::Result<()> {
     let root = root_of(rootfs)?;
     let fd = open_in(root.as_raw_fd(), path, libc::O_RDONLY)?;
     if stat_fd(fd.as_raw_fd())?.st_mode & libc::S_IFMT != libc::S_IFREG {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a regular file",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
     }
     buf.resize(len.min(MAX_READ), 0);
     // SAFETY: pread into a buffer we own.
-    let n = unsafe {
-        libc::pread(
-            fd.as_raw_fd(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-            offset as libc::off_t,
-        )
-    };
+    let n = unsafe { libc::pread(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), offset as libc::off_t) };
     sys::check(n as _, "read")?;
     buf.truncate(n as usize);
     Ok(())
 }
 
 pub fn entry(name: &str, m: Meta) -> FsEntry<'_> {
-    FsEntry {
-        name,
-        mode: m.mode,
-        size: m.size,
-        mtime: m.mtime,
-        mtime_nsec: m.mtime_nsec,
-        ino: m.ino,
-    }
+    FsEntry { name, mode: m.mode, size: m.size, mtime: m.mtime, mtime_nsec: m.mtime_nsec, ino: m.ino }
 }

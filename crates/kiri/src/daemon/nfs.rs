@@ -56,42 +56,28 @@ pub fn socket_path() -> io::Result<PathBuf> {
 
 pub fn start(engine: Arc<Engine>) -> io::Result<PathBuf> {
     let path = socket_path()?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::other("no folder for the files socket"))?;
+    let dir = path.parent().ok_or_else(|| io::Error::other("no folder for the files socket"))?;
     std::fs::create_dir_all(dir)?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     // SAFETY: getuid cannot fail.
     if std::fs::symlink_metadata(dir)?.uid() != unsafe { libc::getuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} belongs to another user", dir.display()),
-        ));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} belongs to another user", dir.display())));
     }
     let _ = std::fs::remove_file(&path); // stale, from a daemon that died
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let handles = Arc::new(Mutex::new(Handles::default()));
-    std::thread::Builder::new()
-        .name("kiri-nfs".into())
-        .spawn(move || {
-            for conn in listener.incoming().flatten() {
-                if !allowed(&conn) {
-                    continue;
-                }
-                let (engine, handles) = (engine.clone(), handles.clone());
-                let _ = std::thread::Builder::new()
-                    .name("kiri-nfs-conn".into())
-                    .spawn(move || {
-                        let _ = Server {
-                            engine: &engine,
-                            handles: &handles,
-                            listing: None,
-                        }
-                        .serve(conn);
-                    });
+    std::thread::Builder::new().name("kiri-nfs".into()).spawn(move || {
+        for conn in listener.incoming().flatten() {
+            if !allowed(&conn) {
+                continue;
             }
-        })?;
+            let (engine, handles) = (engine.clone(), handles.clone());
+            let _ = std::thread::Builder::new().name("kiri-nfs-conn".into()).spawn(move || {
+                let _ = Server { engine: &engine, handles: &handles, listing: None }.serve(conn);
+            });
+        }
+    })?;
     Ok(path)
 }
 
@@ -109,9 +95,7 @@ fn allowed(conn: &UnixStream) -> bool {
 
 /// Where Finder shows the files.
 pub fn mount_point() -> io::Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME is not set"))?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| io::Error::other("HOME is not set"))?;
     Ok(home.join(crate::flavor::APP.get()))
 }
 
@@ -126,31 +110,15 @@ pub fn mount_point() -> io::Result<PathBuf> {
 /// to find.
 pub fn mount(socket: &Path) -> io::Result<PathBuf> {
     let dir = mount_point()?;
-    let socket = socket
-        .to_str()
-        .filter(|s| !s.contains(','))
-        .ok_or_else(|| io::Error::other("the files socket's path cannot be passed to mount_nfs"))?;
+    let socket = socket.to_str().filter(|s| !s.contains(',')).ok_or_else(|| io::Error::other("the files socket's path cannot be passed to mount_nfs"))?;
     match mounted_at(&dir) {
         Some(m) if m.is_ours(socket) => {
             unmount();
             if mounted_at(&dir).is_some() {
-                return Err(io::Error::other(format!(
-                    "the last mount at {} could not be removed",
-                    dir.display()
-                )));
+                return Err(io::Error::other(format!("the last mount at {} could not be removed", dir.display())));
             }
         }
-        Some(m) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "{} already has {} mounted on it ({}), so it was left alone",
-                    dir.display(),
-                    m.from,
-                    m.fstype
-                ),
-            ));
-        }
+        Some(m) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already has {} mounted on it ({}), so it was left alone", dir.display(), m.from, m.fstype))),
         None => {}
     }
     check_folder(&dir)?;
@@ -159,13 +127,8 @@ pub fn mount(socket: &Path) -> io::Result<PathBuf> {
     // host). noac: attributes are never reused, so every read sees the
     // current file. soft: if the daemon is gone, Finder gets an error
     // instead of hanging.
-    let opts = format!(
-        "vers=3,proto=ticotsord,port={socket},mountport={socket},rdonly,nolocks,soft,intr,timeo=10,retrans=2,noac"
-    );
-    let status = std::process::Command::new("/sbin/mount_nfs")
-        .args(["-o", &opts, "<>:/"])
-        .arg(&dir)
-        .status()?;
+    let opts = format!("vers=3,proto=ticotsord,port={socket},mountport={socket},rdonly,nolocks,soft,intr,timeo=10,retrans=2,noac");
+    let status = std::process::Command::new("/sbin/mount_nfs").args(["-o", &opts, "<>:/"]).arg(&dir).status()?;
     if !status.success() {
         return Err(io::Error::other(format!("mount_nfs failed: {status}")));
     }
@@ -175,18 +138,10 @@ pub fn mount(socket: &Path) -> io::Result<PathBuf> {
 /// Removes this engine's mount at `~/Kiri`, and nothing else: another
 /// mount there is someone else's.
 pub fn unmount() {
-    let (Ok(dir), Ok(socket)) = (mount_point(), socket_path()) else {
-        return;
-    };
-    let Some(socket) = socket.to_str() else {
-        return;
-    };
+    let (Ok(dir), Ok(socket)) = (mount_point(), socket_path()) else { return };
+    let Some(socket) = socket.to_str() else { return };
     if mounted_at(&dir).is_some_and(|m| m.is_ours(socket)) {
-        let _ = std::process::Command::new("/sbin/umount")
-            .arg("-f")
-            .arg(&dir)
-            .stderr(std::process::Stdio::null())
-            .status();
+        let _ = std::process::Command::new("/sbin/umount").arg("-f").arg(&dir).stderr(std::process::Stdio::null()).status();
     }
 }
 
@@ -194,12 +149,8 @@ pub fn unmount() {
 /// before it reads a container's folder there, so it never lists the Mac's
 /// own files as the container's.
 pub fn is_mounted() -> bool {
-    let (Ok(dir), Ok(socket)) = (mount_point(), socket_path()) else {
-        return false;
-    };
-    socket
-        .to_str()
-        .is_some_and(|s| mounted_at(&dir).is_some_and(|m| m.is_ours(s)))
+    let (Ok(dir), Ok(socket)) = (mount_point(), socket_path()) else { return false };
+    socket.to_str().is_some_and(|s| mounted_at(&dir).is_some_and(|m| m.is_ours(s)))
 }
 
 /// Files Finder leaves in a folder it has shown; they may be covered.
@@ -214,22 +165,11 @@ fn check_folder(dir: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     };
     if !meta.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{} is not a folder, so it was left alone", dir.display()),
-        ));
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} is not a folder, so it was left alone", dir.display())));
     }
-    let own = std::fs::read_dir(dir)?
-        .flatten()
-        .any(|e| !FINDER_FILES.iter().any(|f| e.file_name() == *f));
+    let own = std::fs::read_dir(dir)?.flatten().any(|e| !FINDER_FILES.iter().any(|f| e.file_name() == *f));
     if own {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "{} already has files in it, so it was left alone; move them and restart the engine to see container files there",
-                dir.display()
-            ),
-        ));
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already has files in it, so it was left alone; move them and restart the engine to see container files there", dir.display())));
     }
     Ok(())
 }
@@ -254,30 +194,13 @@ impl Mounted {
 /// Names are compared without case, as the Mac's disks do by default, and
 /// against the folder's real path, which is what the table holds.
 fn mounted_at(dir: &Path) -> Option<Mounted> {
-    let real = match (
-        dir.parent().and_then(|p| std::fs::canonicalize(p).ok()),
-        dir.file_name(),
-    ) {
+    let real = match (dir.parent().and_then(|p| std::fs::canonicalize(p).ok()), dir.file_name()) {
         (Some(p), Some(n)) => p.join(n),
         _ => dir.to_path_buf(),
     };
-    let trim = |p: &str| {
-        if p.len() > 1 {
-            p.trim_end_matches('/').to_owned()
-        } else {
-            p.to_owned()
-        }
-    };
-    let same = |on: &str| {
-        [dir, real.as_path()].iter().any(|d| {
-            d.to_str()
-                .is_some_and(|d| trim(d).eq_ignore_ascii_case(&trim(on)))
-        })
-    };
-    mounts()
-        .into_iter()
-        .find(|(on, _)| same(on))
-        .map(|(_, m)| m)
+    let trim = |p: &str| if p.len() > 1 { p.trim_end_matches('/').to_owned() } else { p.to_owned() };
+    let same = |on: &str| [dir, real.as_path()].iter().any(|d| d.to_str().is_some_and(|d| trim(d).eq_ignore_ascii_case(&trim(on))));
+    mounts().into_iter().find(|(on, _)| same(on)).map(|(_, m)| m)
 }
 
 /// Every mount: where it is, and what it is.
@@ -285,8 +208,7 @@ fn mounts() -> Vec<(String, Mounted)> {
     let text = |c: &[libc::c_char]| {
         // SAFETY: c_char and u8 have the same size; the kernel NUL-terminates.
         let b: &[u8] = unsafe { std::slice::from_raw_parts(c.as_ptr().cast(), c.len()) };
-        String::from_utf8_lossy(&b[..b.iter().position(|&x| x == 0).unwrap_or(b.len())])
-            .into_owned()
+        String::from_utf8_lossy(&b[..b.iter().position(|&x| x == 0).unwrap_or(b.len())]).into_owned()
     };
     for _ in 0..4 {
         // SAFETY: a null buffer asks for the count only.
@@ -306,18 +228,7 @@ fn mounts() -> Vec<(String, Mounted)> {
         }
         if (got as usize) < cap {
             buf.truncate(got as usize);
-            return buf
-                .iter()
-                .map(|s| {
-                    (
-                        text(&s.f_mntonname),
-                        Mounted {
-                            fstype: text(&s.f_fstypename),
-                            from: text(&s.f_mntfromname),
-                        },
-                    )
-                })
-                .collect();
+            return buf.iter().map(|s| (text(&s.f_mntonname), Mounted { fstype: text(&s.f_fstypename), from: text(&s.f_mntfromname) })).collect();
         }
     }
     Vec::new()
@@ -365,10 +276,7 @@ impl Handles {
         if generation != self.generation {
             return Err(STALE);
         }
-        self.nodes
-            .get((i as usize).wrapping_sub(1))
-            .cloned()
-            .ok_or(STALE)
+        self.nodes.get((i as usize).wrapping_sub(1)).cloned().ok_or(STALE)
     }
 
     /// A stable file id: the handle's index, unique across the export.
@@ -386,10 +294,7 @@ fn encode_fh(generation: u64, i: u64) -> [u8; 16] {
 
 fn decode_fh(fh: &[u8]) -> Option<(u64, u64)> {
     let fh: &[u8; 16] = fh.try_into().ok()?;
-    Some((
-        u64::from_be_bytes(fh[..8].try_into().ok()?),
-        u64::from_be_bytes(fh[8..].try_into().ok()?),
-    ))
+    Some((u64::from_be_bytes(fh[..8].try_into().ok()?), u64::from_be_bytes(fh[8..].try_into().ok()?)))
 }
 
 /// XDR decoding over one call's bytes.
@@ -480,15 +385,7 @@ impl Attr {
     }
 
     fn dir(fileid: u64) -> Attr {
-        Attr {
-            dir: true,
-            link: false,
-            mode: 0o040755,
-            size: 4096,
-            mtime: 0,
-            mtime_nsec: 0,
-            fileid,
-        }
+        Attr { dir: true, link: false, mode: 0o040755, size: 4096, mtime: 0, mtime_nsec: 0, fileid }
     }
 
     /// fattr3. Files belong to the Mac user and read as read-only, so Finder
@@ -514,17 +411,8 @@ impl Attr {
         }
         // SAFETY: getuid/getgid cannot fail.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        o.u32(ftype)
-            .u32(mode)
-            .u32(if self.dir { 2 } else { 1 })
-            .u32(uid)
-            .u32(gid);
-        o.u64(self.size)
-            .u64(self.size.div_ceil(4096) * 4096)
-            .u32(0)
-            .u32(0)
-            .u64(FSID)
-            .u64(self.fileid);
+        o.u32(ftype).u32(mode).u32(if self.dir { 2 } else { 1 }).u32(uid).u32(gid);
+        o.u64(self.size).u64(self.size.div_ceil(4096) * 4096).u32(0).u32(0).u64(FSID).u64(self.fileid);
         for _ in 0..3 {
             o.u32(self.mtime.max(0) as u32).u32(self.mtime_nsec);
         }
@@ -555,10 +443,7 @@ impl Server<'_> {
                 let mark = u32::from_be_bytes(mark);
                 let len = (mark & 0x7fff_ffff) as usize;
                 if record.len() + len > MAX_RECORD {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "RPC record too large",
-                    ));
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "RPC record too large"));
                 }
                 let at = record.len();
                 record.resize(at + len, 0);
@@ -567,9 +452,7 @@ impl Server<'_> {
                     break;
                 }
             }
-            let Some(reply) = self.call(&record) else {
-                continue;
-            };
+            let Some(reply) = self.call(&record) else { continue };
             let mut framed = Vec::with_capacity(reply.len() + 4);
             framed.extend_from_slice(&(0x8000_0000 | reply.len() as u32).to_be_bytes());
             framed.extend_from_slice(&reply);
@@ -625,11 +508,7 @@ impl Server<'_> {
             0 | 3 | 4 => {} // NULL, UMNT, UMNTALL
             1 => {
                 a.str()?;
-                let fh = self
-                    .handles
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(Node::Root);
+                let fh = self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(Node::Root);
                 o.u32(OK).opaque(&fh).u32(1).u32(1); // AUTH_SYS
             }
             5 => {
@@ -706,13 +585,7 @@ impl Server<'_> {
                     Ok(at) => {
                         o.u32(OK);
                         at.post_op(o);
-                        o.u64(1 << 40)
-                            .u64(0)
-                            .u64(0)
-                            .u64(1 << 20)
-                            .u64(0)
-                            .u64(0)
-                            .u32(0);
+                        o.u64(1 << 40).u64(0).u64(0).u64(1 << 20).u64(0).u64(0).u32(0);
                     }
                     Err(e) => {
                         o.u32(e).bool(false);
@@ -725,13 +598,7 @@ impl Server<'_> {
                     Ok(at) => {
                         o.u32(OK);
                         at.post_op(o);
-                        o.u32(MAX_READ)
-                            .u32(MAX_READ)
-                            .u32(4096)
-                            .u32(0)
-                            .u32(0)
-                            .u32(4096)
-                            .u32(64 * 1024);
+                        o.u32(MAX_READ).u32(MAX_READ).u32(4096).u32(0).u32(0).u32(4096).u32(64 * 1024);
                         o.u64(u64::MAX >> 1).u32(0).u32(1).u32(0x08); // FSF_HOMOGENEOUS
                     }
                     Err(e) => {
@@ -745,12 +612,7 @@ impl Server<'_> {
                     Ok(at) => {
                         o.u32(OK);
                         at.post_op(o);
-                        o.u32(1)
-                            .u32(255)
-                            .bool(true)
-                            .bool(true)
-                            .bool(false)
-                            .bool(true);
+                        o.u32(1).u32(255).bool(true).bool(true).bool(false).bool(true);
                     }
                     Err(e) => {
                         o.u32(e).bool(false);
@@ -776,17 +638,11 @@ impl Server<'_> {
     }
 
     fn node(&self, fh: &[u8]) -> Result<Node, u32> {
-        self.handles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .node(fh)
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).node(fh)
     }
 
     fn handle(&self, node: Node) -> [u8; 16] {
-        self.handles
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(node)
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).get(node)
     }
 
     /// The running container `id`, or STALE once it stopped.
@@ -812,19 +668,10 @@ impl Server<'_> {
     /// The root changes whenever the set of running containers does; its
     /// mtime says so, which is what makes the client list it again.
     fn root_attr(&self) -> Attr {
-        let mut names = self
-            .engine
-            .each(|c| (c.status == Status::Running).then(|| c.id.clone()));
+        let mut names = self.engine.each(|c| (c.status == Status::Running).then(|| c.id.clone()));
         names.sort();
-        let h = names.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, n| {
-            n.bytes()
-                .fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3))
-        });
-        Attr {
-            mtime: 1_700_000_000 + (h % 1_000_000) as i64,
-            mtime_nsec: ((h >> 20) % 1_000_000_000) as u32,
-            ..Attr::dir(1)
-        }
+        let h = names.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, n| n.bytes().fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)));
+        Attr { mtime: 1_700_000_000 + (h % 1_000_000) as i64, mtime_nsec: ((h >> 20) % 1_000_000_000) as u32, ..Attr::dir(1) }
     }
 
     fn lookup(&mut self, dir: &[u8], name: &str, o: &mut Out) {
@@ -844,19 +691,9 @@ impl Server<'_> {
             _ if name == "." => Ok((dir.try_into().unwrap_or([0; 16]), None)),
             Ok(Node::Root) => {
                 // Names are not unique over time; the running one wins.
-                let id = self
-                    .engine
-                    .each(|c| (c.status == Status::Running && c.name == name).then(|| c.id.clone()))
-                    .into_iter()
-                    .next();
+                let id = self.engine.each(|c| (c.status == Status::Running && c.name == name).then(|| c.id.clone())).into_iter().next();
                 match id {
-                    Some(id) => Ok((
-                        self.handle(Node::File {
-                            id,
-                            path: "/".into(),
-                        }),
-                        None,
-                    )),
+                    Some(id) => Ok((self.handle(Node::File { id, path: "/".into() }), None)),
                     None => Err(NOENT),
                 }
             }
@@ -923,11 +760,7 @@ impl Server<'_> {
             Ok(data) => {
                 // No attributes: the client already holds fresh ones from its
                 // open, and fetching them would cost another guest round trip.
-                o.u32(OK)
-                    .bool(false)
-                    .u32(data.len() as u32)
-                    .bool((data.len() as u32) < count)
-                    .opaque(&data);
+                o.u32(OK).bool(false).u32(data.len() as u32).bool((data.len() as u32) < count).opaque(&data);
             }
             Err(e) => {
                 o.u32(errno(e)).bool(false);
@@ -955,13 +788,7 @@ impl Server<'_> {
             let list = match &node {
                 Node::Root => {
                     let mut names = self.engine.each(|c| {
-                        (c.status == Status::Running).then(|| FileInfo {
-                            name: c.name.clone(),
-                            mode: 0o040755,
-                            size: 4096,
-                            mtime: 0,
-                            mtime_nsec: 0,
-                        })
+                        (c.status == Status::Running).then(|| FileInfo { name: c.name.clone(), mode: 0o040755, size: 4096, mtime: 0, mtime_nsec: 0 })
                     });
                     names.sort_by(|a, b| a.name.cmp(&b.name));
                     names
@@ -977,11 +804,7 @@ impl Server<'_> {
             };
             self.listing = Some((*fh, list));
         }
-        let entries = self
-            .listing
-            .as_ref()
-            .map(|(_, l)| l.clone())
-            .unwrap_or_default();
+        let entries = self.listing.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
         o.u32(OK);
         dir_attr.post_op(o);
         o.u64(0); // cookie verifier
@@ -991,29 +814,13 @@ impl Server<'_> {
         let mut eof = true;
         for (i, f) in entries.iter().enumerate().skip(cookie as usize) {
             let child = match &node {
-                Node::Root => self
-                    .engine
-                    .each(|c| {
-                        (c.status == Status::Running && c.name == f.name).then(|| c.id.clone())
-                    })
-                    .into_iter()
-                    .next()
-                    .map(|id| Node::File {
-                        id,
-                        path: "/".into(),
-                    }),
-                Node::File { id, path } => Some(Node::File {
-                    id: id.clone(),
-                    path: format!("{}/{}", path.trim_end_matches('/'), f.name),
-                }),
+                Node::Root => self.engine.each(|c| (c.status == Status::Running && c.name == f.name).then(|| c.id.clone())).into_iter().next().map(|id| Node::File { id, path: "/".into() }),
+                Node::File { id, path } => Some(Node::File { id: id.clone(), path: format!("{}/{}", path.trim_end_matches('/'), f.name) }),
             };
             let Some(child) = child else { continue };
             let cfh = self.handle(child);
             let mut e = Out::default();
-            e.bool(true)
-                .u64(Handles::fileid(&cfh))
-                .opaque(f.name.as_bytes())
-                .u64(i as u64 + 1);
+            e.bool(true).u64(Handles::fileid(&cfh)).opaque(f.name.as_bytes()).u64(i as u64 + 1);
             if plus {
                 if matches!(node, Node::Root) {
                     // Container folders' own attributes come with LOOKUP/GETATTR.
@@ -1064,19 +871,13 @@ mod tests {
         let mut h = Handles::default();
         let root = h.get(Node::Root);
         assert_eq!(h.node(&root), Ok(Node::Root));
-        let a = Node::File {
-            id: "c1".into(),
-            path: "/etc".into(),
-        };
+        let a = Node::File { id: "c1".into(), path: "/etc".into() };
         let fa = h.get(a.clone());
         assert_eq!(h.get(a.clone()), fa);
         assert_eq!(h.node(&fa), Ok(a));
         assert_eq!(h.node(b"short"), Err(BADHANDLE));
         for i in 0..MAX_HANDLES {
-            h.get(Node::File {
-                id: "c1".into(),
-                path: format!("/{i}"),
-            });
+            h.get(Node::File { id: "c1".into(), path: format!("/{i}") });
         }
         // The table started over: the old handle is stale, the root is not.
         assert_eq!(h.node(&fa), Err(STALE));
@@ -1126,10 +927,7 @@ mod tests {
         let files = d.join("files");
         std::fs::create_dir(&files).unwrap();
         std::fs::write(files.join("keep.txt"), b"keep").unwrap();
-        assert_eq!(
-            check_folder(&files).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
+        assert_eq!(check_folder(&files).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         let hidden = d.join("hidden");
         std::fs::create_dir_all(hidden.join(".git")).unwrap();
         assert!(check_folder(&hidden).is_err());
@@ -1146,10 +944,7 @@ mod tests {
     #[test]
     fn knows_its_own_mount() {
         let sock = "/Users/a/.kiri/files/nfs.sock";
-        let m = |fstype: &str, from: &str| Mounted {
-            fstype: fstype.into(),
-            from: from.into(),
-        };
+        let m = |fstype: &str, from: &str| Mounted { fstype: fstype.into(), from: from.into() };
         assert!(m("nfs", "</Users/a/.kiri/files/nfs.sock>:/").is_ours(sock));
         assert!(!m("nfs", "</Users/a/.kiri-other/files/nfs.sock>:/").is_ours(sock));
         assert!(!m("nfs", "server:/export").is_ours(sock));
@@ -1161,10 +956,7 @@ mod tests {
     #[test]
     fn reads_the_mount_table() {
         assert!(mounts().iter().any(|(on, _)| on == "/"));
-        assert_eq!(
-            mounted_at(Path::new("/")).map(|m| m.from.is_empty()),
-            Some(false)
-        );
+        assert_eq!(mounted_at(Path::new("/")).map(|m| m.from.is_empty()), Some(false));
         let d = scratch("table");
         assert_eq!(mounted_at(&d), None);
         std::fs::remove_dir_all(&d).unwrap();

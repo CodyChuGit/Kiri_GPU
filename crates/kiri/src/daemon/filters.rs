@@ -14,57 +14,33 @@ pub struct Filters {
 
 impl Filters {
     pub fn parse(raw: Option<&str>) -> Result<Filters, String> {
-        let Some(raw) = raw.filter(|r| !r.is_empty()) else {
-            return Ok(Filters::default());
-        };
+        let Some(raw) = raw.filter(|r| !r.is_empty()) else { return Ok(Filters::default()) };
         let v: Value = serde_json::from_str(raw).map_err(|e| format!("invalid filters: {e}"))?;
-        let Value::Object(map) = v else {
-            return Err("invalid filters: not an object".into());
-        };
+        let Value::Object(map) = v else { return Err("invalid filters: not an object".into()) };
         let mut out = Vec::with_capacity(map.len());
         for (k, v) in map {
             let values = match v {
-                Value::Array(a) => a
-                    .into_iter()
-                    .filter_map(|s| s.as_str().map(str::to_owned))
-                    .collect(),
-                Value::Object(o) => o
-                    .into_iter()
-                    .filter(|(_, on)| on.as_bool().unwrap_or(false))
-                    .map(|(s, _)| s)
-                    .collect(),
+                Value::Array(a) => a.into_iter().filter_map(|s| s.as_str().map(str::to_owned)).collect(),
+                Value::Object(o) => o.into_iter().filter(|(_, on)| on.as_bool().unwrap_or(false)).map(|(s, _)| s).collect(),
                 Value::String(s) => vec![s],
                 _ => Vec::new(),
             };
             out.push((k, values));
         }
-        let names = out
-            .iter()
-            .filter(|(k, _)| k == "name")
-            .flat_map(|(_, v)| v)
-            .map(|p| NamePattern::new(p))
-            .collect();
+        let names = out.iter().filter(|(k, _)| k == "name").flat_map(|(_, v)| v).map(|p| NamePattern::new(p)).collect();
         Ok(Filters { fields: out, names })
     }
 
     /// Rejects keys this list does not understand, as Docker does.
     pub fn only(&self, known: &[&str]) -> Result<(), String> {
-        match self
-            .fields
-            .iter()
-            .find(|(k, _)| !known.contains(&k.as_str()))
-        {
+        match self.fields.iter().find(|(k, _)| !known.contains(&k.as_str())) {
             Some((k, _)) => Err(format!("invalid filter '{k}'")),
             None => Ok(()),
         }
     }
 
     pub fn values(&self, key: &str) -> Option<&[String]> {
-        self.fields
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_slice())
-            .filter(|v| !v.is_empty())
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_slice()).filter(|v| !v.is_empty())
     }
 
     /// True when `key` is absent or any of its values satisfies `f`.
@@ -79,11 +55,7 @@ impl Filters {
             Some((k, v)) => labels.get(k).and_then(Value::as_str) == Some(v),
             None => labels.get(want).is_some(),
         };
-        self.values("label")
-            .is_none_or(|v| v.iter().all(|w| has(w)))
-            && self
-                .values("label!")
-                .is_none_or(|v| !v.iter().any(|w| has(w)))
+        self.values("label").is_none_or(|v| v.iter().all(|w| has(w))) && self.values("label!").is_none_or(|v| !v.iter().any(|w| has(w)))
     }
 
     /// The `name` filter, matched as Docker matches it: each value is a
@@ -96,16 +68,12 @@ impl Filters {
         }
         let bare = name.trim_start_matches('/');
         let slashed = format!("/{bare}");
-        self.names
-            .iter()
-            .any(|p| p.matches(bare) || p.matches(&slashed))
+        self.names.iter().any(|p| p.matches(bare) || p.matches(&slashed))
     }
 
     /// `true`/`1` or `false`/`0` for a boolean filter, if given.
     pub fn bool(&self, key: &str) -> Option<bool> {
-        self.values(key)
-            .and_then(|v| v.first())
-            .map(|s| matches!(s.as_str(), "true" | "1"))
+        self.values(key).and_then(|v| v.first()).map(|s| matches!(s.as_str(), "true" | "1"))
     }
 }
 
@@ -120,10 +88,7 @@ struct NamePattern {
 
 impl NamePattern {
     fn new(text: &str) -> NamePattern {
-        NamePattern {
-            text: text.to_owned(),
-            re: Regex::new(text).ok(),
-        }
+        NamePattern { text: text.to_owned(), re: Regex::new(text).ok() }
     }
 
     fn matches(&self, name: &str) -> bool {
@@ -161,22 +126,13 @@ mod tests {
     }
 
     fn name_matches(pattern: &str, name: &str) -> bool {
-        Filters::parse(Some(&json!({ "name": [pattern] }).to_string()))
-            .unwrap()
-            .name(name)
+        Filters::parse(Some(&json!({ "name": [pattern] }).to_string())).unwrap().name(name)
     }
 
     #[test]
     fn name_filter_is_a_regex_like_docker() {
         // #385: k3d looks up its nodes with `^[/]?<node>$`.
-        for p in [
-            "^/probe-tools$",
-            "probe-tools$",
-            "^/?probe-tools$",
-            "^[/]?probe-tools$",
-            "^probe-.+$",
-            "tools|nope",
-        ] {
+        for p in ["^/probe-tools$", "probe-tools$", "^/?probe-tools$", "^[/]?probe-tools$", "^probe-.+$", "tools|nope"] {
             assert!(name_matches(p, "probe-tools"), "{p}");
             assert!(name_matches(p, "/probe-tools"), "{p}");
         }
@@ -191,17 +147,10 @@ mod tests {
 
     #[test]
     fn name_filter_values_or_together_and_and_with_others() {
-        let f = Filters::parse(Some(
-            r#"{"name":["^[/]?one$","^two$"],"label":["app=k3d"]}"#,
-        ))
-        .unwrap();
+        let f = Filters::parse(Some(r#"{"name":["^[/]?one$","^two$"],"label":["app=k3d"]}"#)).unwrap();
         assert!(f.name("one") && f.name("/two") && !f.name("three"));
         assert!(Filters::default().name("anything"));
-        assert!(
-            Filters::parse(Some(r#"{"name":[]}"#))
-                .unwrap()
-                .name("anything")
-        );
+        assert!(Filters::parse(Some(r#"{"name":[]}"#)).unwrap().name("anything"));
     }
 
     #[test]

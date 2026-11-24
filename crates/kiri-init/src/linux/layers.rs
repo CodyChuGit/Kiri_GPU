@@ -20,10 +20,7 @@ use super::{inroot, sys};
 pub fn hex(digest: &str) -> io::Result<&str> {
     let h = digest.strip_prefix("sha256:").unwrap_or(digest);
     if h.len() != 64 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("bad layer digest {digest}"),
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad layer digest {digest}")));
     }
     Ok(h)
 }
@@ -42,11 +39,7 @@ pub fn present(root: &Path, digest: &str) -> bool {
 
 /// Reads exactly `begin.size` bytes of blob from `stream` and unpacks them.
 /// The stream stays in sync even if unpacking fails part-way.
-pub fn receive(
-    stream: &mut impl Read,
-    begin: &LayerBegin<'_>,
-    root: &Path,
-) -> io::Result<LayerStored> {
+pub fn receive(stream: &mut impl Read, begin: &LayerBegin<'_>, root: &Path) -> io::Result<LayerStored> {
     let started = Instant::now();
     let final_dir = dir(root, begin.digest)?;
     let tmp = root.join(format!(".tmp-{}", hex(begin.digest)?));
@@ -58,13 +51,8 @@ pub fn receive(
     // Whatever happened, consume the rest of the blob so the next frame lines up.
     io::copy(&mut limited, &mut io::sink())?;
 
-    match result.and_then(|unpacked_bytes| {
-        install(root, begin.digest, &tmp, &final_dir).map(|()| unpacked_bytes)
-    }) {
-        Ok(unpacked_bytes) => Ok(LayerStored {
-            unpacked_bytes,
-            elapsed_ns: started.elapsed().as_nanos() as u64,
-        }),
+    match result.and_then(|unpacked_bytes| install(root, begin.digest, &tmp, &final_dir).map(|()| unpacked_bytes)) {
+        Ok(unpacked_bytes) => Ok(LayerStored { unpacked_bytes, elapsed_ns: started.elapsed().as_nanos() as u64 }),
         Err(e) => {
             let _ = fs::remove_dir_all(&tmp);
             Err(e)
@@ -84,13 +72,8 @@ fn install(root: &Path, digest: &str, tmp: &Path, final_dir: &Path) -> io::Resul
         // A copy without a marker was cut short and may hold empty files.
         // Moved aside rather than deleted here, which can take a while;
         // the next RetainLayers clears it.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        fs::rename(
-            final_dir,
-            root.join(format!(".stale-{}-{nanos}", hex(digest)?)),
-        )?;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        fs::rename(final_dir, root.join(format!(".stale-{}-{nanos}", hex(digest)?)))?;
     }
     fs::rename(tmp, final_dir)?;
     fs::File::create(marker(root, digest)?)?.sync_all()?;
@@ -101,10 +84,7 @@ fn install(root: &Path, digest: &str, tmp: &Path, final_dir: &Path) -> io::Resul
 fn sync_fs(path: &Path) -> io::Result<()> {
     let f = fs::File::open(path)?;
     // SAFETY: a valid descriptor that outlives the call.
-    sys::check(
-        unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&f)) } as _,
-        "syncfs",
-    )?;
+    sys::check(unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&f)) } as _, "syncfs")?;
     Ok(())
 }
 
@@ -113,9 +93,7 @@ fn sync_fs(path: &Path) -> io::Result<()> {
 /// one of those names is left alone.
 pub fn retain<'a>(root: &Path, keep: impl Iterator<Item = &'a str>) {
     let keep: std::collections::HashSet<&str> = keep.filter_map(|d| hex(d).ok()).collect();
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
+    let Ok(entries) = fs::read_dir(root) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -131,11 +109,7 @@ pub fn retain<'a>(root: &Path, keep: impl Iterator<Item = &'a str>) {
         let whole = layer && root.join(h).is_dir() && root.join(format!("{h}.done")).is_file();
         if leftover || !keep.contains(h) || !whole {
             let path = entry.path();
-            let _ = if is_marker || !path.is_dir() {
-                fs::remove_file(&path)
-            } else {
-                fs::remove_dir_all(&path)
-            };
+            let _ = if is_marker || !path.is_dir() { fs::remove_file(&path) } else { fs::remove_dir_all(&path) };
         }
     }
 }
@@ -158,10 +132,7 @@ impl<R: Read> Read for Capped<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         if n as u64 > self.left {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "layer expands beyond its allowed size",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "layer expands beyond its allowed size"));
         }
         self.left -= n as u64;
         Ok(n)
@@ -172,31 +143,13 @@ fn unpack(blob: &mut impl Read, media_type: &str, dest: &Path, compressed: u64) 
     let buffered = BufReader::with_capacity(256 * 1024, blob);
     let left = expansion_cap(compressed);
     if media_type.ends_with("gzip") {
-        untar(
-            Capped {
-                inner: flate2::read::MultiGzDecoder::new(buffered),
-                left,
-            },
-            dest,
-        )
+        untar(Capped { inner: flate2::read::MultiGzDecoder::new(buffered), left }, dest)
     } else if media_type.ends_with("zstd") {
         let decoder = ruzstd::decoding::StreamingDecoder::new(buffered)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("zstd: {e}")))?;
-        untar(
-            Capped {
-                inner: decoder,
-                left,
-            },
-            dest,
-        )
+        untar(Capped { inner: decoder, left }, dest)
     } else {
-        untar(
-            Capped {
-                inner: buffered,
-                left,
-            },
-            dest,
-        )
+        untar(Capped { inner: buffered, left }, dest)
     }
 }
 
@@ -225,13 +178,7 @@ fn untar(reader: impl Read, dest: &Path) -> io::Result<u64> {
                 let p = sys::cstr(&parent)?;
                 // SAFETY: valid NUL-terminated path, name and a 1-byte value.
                 let ret = unsafe {
-                    libc::setxattr(
-                        p.as_ptr(),
-                        c"trusted.overlay.opaque".as_ptr(),
-                        b"y".as_ptr().cast(),
-                        1,
-                        0,
-                    )
+                    libc::setxattr(p.as_ptr(), c"trusted.overlay.opaque".as_ptr(), b"y".as_ptr().cast(), 1, 0)
                 };
                 sys::check(ret as _, "mark opaque")?;
             } else {
@@ -244,23 +191,13 @@ fn untar(reader: impl Read, dest: &Path) -> io::Result<u64> {
         }
         total += entry.size();
         if entry.header().entry_type().is_hard_link() {
-            let source = entry.link_name()?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "hard link has no target")
-            })?;
+            let source = entry.link_name()?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "hard link has no target"))?;
             let root = inroot::open_root(dest)?;
             let (from, source) = hardlink_parent(root.as_fd(), &source)?;
             let (to, name) = hardlink_parent(root.as_fd(), &path)?;
             // SAFETY: parents are confined directory fds and names are NUL-terminated.
             // Flags 0 links the symlink itself, without following its absolute target.
-            let ret = unsafe {
-                libc::linkat(
-                    from.as_raw_fd(),
-                    source.as_ptr(),
-                    to.as_raw_fd(),
-                    name.as_ptr(),
-                    0,
-                )
-            };
+            let ret = unsafe { libc::linkat(from.as_raw_fd(), source.as_ptr(), to.as_raw_fd(), name.as_ptr(), 0) };
             sys::check(ret as _, "hard link")?;
         } else {
             entry.unpack_in(dest)?;
@@ -283,11 +220,7 @@ fn hardlink_parent(root: BorrowedFd<'_>, path: &Path) -> io::Result<(OwnedFd, CS
         }
     }
     let name = relative.file_name().ok_or_else(escapes)?;
-    let parent = inroot::open(
-        root,
-        relative.parent().unwrap_or(Path::new("")),
-        inroot::Last::Dir,
-    )?;
+    let parent = inroot::open(root, relative.parent().unwrap_or(Path::new("")), inroot::Last::Dir)?;
     Ok((parent.fd, sys::cstr(Path::new(name))?))
 }
 
@@ -340,18 +273,9 @@ mod tests {
     fn hardlinks_preserve_source_inode() {
         use std::os::unix::fs::MetadataExt;
 
-        for (i, link) in [
-            None,
-            Some("target"),
-            Some("/target"),
-            Some("/missing-target"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (i, link) in [None, Some("target"), Some("/target"), Some("/missing-target")].into_iter().enumerate() {
             let mut b = tar::Builder::new(Vec::new());
-            b.append_data(&mut header(2, 0o644), "target", &b"[]"[..])
-                .unwrap();
+            b.append_data(&mut header(2, 0o644), "target", &b"[]"[..]).unwrap();
             let source = if let Some(to) = link {
                 let mut h = header(0, 0o777);
                 h.set_entry_type(tar::EntryType::Symlink);
@@ -362,26 +286,15 @@ mod tests {
             };
             let mut h = header(0, 0o777);
             h.set_entry_type(tar::EntryType::Link);
-            b.append_link(&mut h, "nested/manifest.nix", source)
-                .unwrap();
+            b.append_link(&mut h, "nested/manifest.nix", source).unwrap();
             let bytes = b.into_inner().unwrap();
             let dest = scratch(&format!("hardlink-{i}"));
-            untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX,
-                },
-                &dest,
-            )
-            .unwrap();
+            untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).unwrap();
             let from = fs::symlink_metadata(dest.join(source)).unwrap();
             let to = fs::symlink_metadata(dest.join("nested/manifest.nix")).unwrap();
             assert_eq!((from.dev(), from.ino()), (to.dev(), to.ino()), "{link:?}");
             if let Some(link) = link {
-                assert_eq!(
-                    fs::read_link(dest.join("nested/manifest.nix")).unwrap(),
-                    Path::new(link)
-                );
+                assert_eq!(fs::read_link(dest.join("nested/manifest.nix")).unwrap(), Path::new(link));
             } else {
                 assert_eq!(fs::read(dest.join("nested/manifest.nix")).unwrap(), b"[]");
             }
@@ -394,8 +307,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let mut b = tar::Builder::new(Vec::new());
-        b.append_data(&mut header(1, 0o644), "dir/file", &b"x"[..])
-            .unwrap();
+        b.append_data(&mut header(1, 0o644), "dir/file", &b"x"[..]).unwrap();
         let mut h = header(0, 0o777);
         h.set_entry_type(tar::EntryType::Symlink);
         b.append_link(&mut h, "alias", "dir").unwrap();
@@ -404,19 +316,9 @@ mod tests {
         b.append_link(&mut h, "alias/copy", "alias/file").unwrap();
         let bytes = b.into_inner().unwrap();
         let dest = scratch("hardlink-parents");
-        untar(
-            Capped {
-                inner: &bytes[..],
-                left: u64::MAX,
-            },
-            &dest,
-        )
-        .unwrap();
+        untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).unwrap();
         assert_eq!(fs::read(dest.join("dir/copy")).unwrap(), b"x");
-        assert_eq!(
-            fs::metadata(dest.join("dir/file")).unwrap().ino(),
-            fs::metadata(dest.join("dir/copy")).unwrap().ino()
-        );
+        assert_eq!(fs::metadata(dest.join("dir/file")).unwrap().ino(), fs::metadata(dest.join("dir/copy")).unwrap().ino());
         fs::remove_dir_all(dest).unwrap();
     }
 
@@ -429,10 +331,7 @@ mod tests {
             ("escape/secret", "copied"),
             ("file", "escape/copied"),
             ("file", "../outside/copied"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ].into_iter().enumerate() {
             let base = scratch(&format!("hardlink-escape-{i}"));
             let dest = base.join("layer");
             let outside = base.join("outside");
@@ -440,8 +339,7 @@ mod tests {
             fs::create_dir(&outside).unwrap();
             fs::write(outside.join("secret"), b"keep").unwrap();
             let mut b = tar::Builder::new(Vec::new());
-            b.append_data(&mut header(1, 0o644), "file", &b"x"[..])
-                .unwrap();
+            b.append_data(&mut header(1, 0o644), "file", &b"x"[..]).unwrap();
             let mut h = header(0, 0o777);
             h.set_entry_type(tar::EntryType::Symlink);
             b.append_link(&mut h, "escape", &outside).unwrap();
@@ -453,23 +351,12 @@ mod tests {
             h.set_cksum();
             b.append(&h, io::empty()).unwrap();
             let bytes = b.into_inner().unwrap();
-            let _ = untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX,
-                },
-                &dest,
-            );
+            let _ = untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest);
             assert_eq!(fs::read_link(dest.join("escape")).unwrap(), outside);
             assert!(!dest.join("copied").exists());
             assert!(!outside.join("copied").exists());
             assert_eq!(fs::read(outside.join("secret")).unwrap(), b"keep");
-            assert_eq!(
-                fs::symlink_metadata(outside.join("secret"))
-                    .unwrap()
-                    .nlink(),
-                1
-            );
+            assert_eq!(fs::symlink_metadata(outside.join("secret")).unwrap().nlink(), 1);
             fs::remove_dir_all(base).unwrap();
         }
     }
@@ -486,23 +373,10 @@ mod tests {
         b.append_data(&mut h, "foo/x", &b"x"[..]).unwrap();
         let bytes = b.into_inner().unwrap();
         let dest = scratch("escape");
-        let err = untar(
-            Capped {
-                inner: &bytes[..],
-                left: u64::MAX,
-            },
-            &dest,
-        )
-        .expect_err("writing through a symlinked parent must fail");
+        let err = untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).expect_err("writing through a symlinked parent must fail");
         // The refusal must be the path check, not some other unpack error.
-        assert!(
-            err.to_string().contains("outside"),
-            "unexpected error: {err}"
-        );
-        assert!(
-            !Path::new("/x").is_file() || fs::read_to_string("/x").map_or(true, |c| c != "x"),
-            "escaped to /x"
-        );
+        assert!(err.to_string().contains("outside"), "unexpected error: {err}");
+        assert!(!Path::new("/x").is_file() || fs::read_to_string("/x").map_or(true, |c| c != "x"), "escaped to /x");
         let _ = fs::remove_dir_all(&dest);
     }
 
@@ -531,27 +405,10 @@ mod tests {
         for hidden in ["foo/.wh.victim", "foo/.wh..wh..opq"] {
             let dest = scratch("wh-escape");
             let bytes = whiteout_layer(&[("foo", Some(to)), (hidden, None)]);
-            let err = untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX,
-                },
-                &dest,
-            )
-            .expect_err(hidden);
-            assert!(
-                err.to_string().contains("escapes"),
-                "{hidden}: unexpected error: {err}"
-            );
-            assert_eq!(
-                fs::read_to_string(outside.join("victim")).unwrap(),
-                "keep",
-                "{hidden}"
-            );
-            assert!(
-                !outside.join(&hidden[4..]).exists(),
-                "{hidden}: placeholder written outside"
-            );
+            let err = untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).expect_err(hidden);
+            assert!(err.to_string().contains("escapes"), "{hidden}: unexpected error: {err}");
+            assert_eq!(fs::read_to_string(outside.join("victim")).unwrap(), "keep", "{hidden}");
+            assert!(!outside.join(&hidden[4..]).exists(), "{hidden}: placeholder written outside");
             let _ = fs::remove_dir_all(&dest);
         }
         let _ = fs::remove_dir_all(&outside);
@@ -566,18 +423,8 @@ mod tests {
             fs::create_dir_all(dest.join("d")).unwrap();
             fs::write(dest.join("d/keep"), "x").unwrap();
             let bytes = whiteout_layer(&[(hidden, None)]);
-            let err = untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX,
-                },
-                &dest,
-            )
-            .expect_err(hidden);
-            assert!(
-                err.to_string().contains("escapes"),
-                "{hidden}: unexpected error: {err}"
-            );
+            let err = untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).expect_err(hidden);
+            assert!(err.to_string().contains("escapes"), "{hidden}: unexpected error: {err}");
             assert!(dest.join("d/keep").is_file(), "{hidden}");
             let _ = fs::remove_dir_all(&dest);
         }
@@ -593,24 +440,14 @@ mod tests {
         fs::write(base.join("keep"), "x").unwrap();
         let path = format!("{}/.wh.keep", base.display());
         let mut b = tar::Builder::new(Vec::new());
-        b.append_data(&mut header(0, 0o644), "a".repeat(path.len()), &[][..])
-            .unwrap();
+        b.append_data(&mut header(0, 0o644), "a".repeat(path.len()), &[][..]).unwrap();
         let mut bytes = b.into_inner().unwrap();
         bytes[..100].fill(0);
         bytes[..path.len()].copy_from_slice(path.as_bytes());
         bytes[148..156].fill(b' ');
         let checksum: u32 = bytes[..512].iter().map(|b| u32::from(*b)).sum();
         bytes[148..156].copy_from_slice(format!("{checksum:06o}\0 ").as_bytes());
-        assert!(
-            untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX
-                },
-                &dest
-            )
-            .is_err()
-        );
+        assert!(untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).is_err());
         assert!(base.join("keep").is_file());
         let _ = fs::remove_dir_all(&base);
     }
@@ -629,23 +466,10 @@ mod tests {
         fs::create_dir_all(dest.join("etc")).unwrap();
         fs::write(dest.join("etc/gone"), "x").unwrap();
         let bytes = whiteout_layer(&[("etc/.wh.gone", None)]);
-        untar(
-            Capped {
-                inner: &bytes[..],
-                left: u64::MAX,
-            },
-            &dest,
-        )
-        .unwrap();
+        untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).unwrap();
         let m = fs::symlink_metadata(dest.join("etc/gone")).unwrap();
-        assert!(
-            m.file_type().is_char_device() && m.rdev() == 0,
-            "not a 0:0 char device"
-        );
-        assert!(
-            !dest.join("etc/.wh.gone").exists(),
-            "placeholder left behind"
-        );
+        assert!(m.file_type().is_char_device() && m.rdev() == 0, "not a 0:0 char device");
+        assert!(!dest.join("etc/.wh.gone").exists(), "placeholder left behind");
         let _ = fs::remove_dir_all(&dest);
         // As `docker commit` writes them: no owner or time, which tar-rs
         // would refuse to unpack. A whiteout is never unpacked, so it works,
@@ -655,32 +479,18 @@ mod tests {
         h.set_entry_type(tar::EntryType::Regular);
         h.set_size(0);
         h.set_mode(0o644);
-        b.append_data(&mut h, "usr/share/.wh.doc", std::io::empty())
-            .unwrap();
+        b.append_data(&mut h, "usr/share/.wh.doc", std::io::empty()).unwrap();
         let bytes = b.into_inner().unwrap();
         let dest = scratch("wh-bare");
-        untar(
-            Capped {
-                inner: &bytes[..],
-                left: u64::MAX,
-            },
-            &dest,
-        )
-        .unwrap();
-        assert!(
-            fs::symlink_metadata(dest.join("usr/share/doc"))
-                .unwrap()
-                .file_type()
-                .is_char_device()
-        );
+        untar(Capped { inner: &bytes[..], left: u64::MAX }, &dest).unwrap();
+        assert!(fs::symlink_metadata(dest.join("usr/share/doc")).unwrap().file_type().is_char_device());
         let _ = fs::remove_dir_all(&dest);
     }
 
     fn layer_blob(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut b = tar::Builder::new(Vec::new());
         for (name, data) in files {
-            b.append_data(&mut header(data.len() as u64, 0o644), name, *data)
-                .unwrap();
+            b.append_data(&mut header(data.len() as u64, 0o644), name, *data).unwrap();
         }
         b.into_inner().unwrap()
     }
@@ -689,11 +499,7 @@ mod tests {
     const D2: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
     fn send(root: &Path, digest: &str, blob: &[u8]) -> LayerStored {
-        let begin = LayerBegin {
-            digest,
-            media_type: "application/vnd.oci.image.layer.v1.tar",
-            size: blob.len() as u64,
-        };
+        let begin = LayerBegin { digest, media_type: "application/vnd.oci.image.layer.v1.tar", size: blob.len() as u64 };
         receive(&mut &blob[..], &begin, root).unwrap()
     }
 
@@ -705,10 +511,7 @@ mod tests {
         let blob = layer_blob(&[("bin/sh", b"real")]);
         send(&root, D1, &blob);
         assert!(present(&root, D1));
-        assert_eq!(
-            fs::read(dir(&root, D1).unwrap().join("bin/sh")).unwrap(),
-            b"real"
-        );
+        assert_eq!(fs::read(dir(&root, D1).unwrap().join("bin/sh")).unwrap(), b"real");
 
         // What a VM stopped before the flush leaves: names, empty contents.
         fs::remove_file(marker(&root, D1).unwrap()).unwrap();
@@ -716,10 +519,7 @@ mod tests {
         assert!(!present(&root, D1));
         send(&root, D1, &blob);
         assert!(present(&root, D1));
-        assert_eq!(
-            fs::read(dir(&root, D1).unwrap().join("bin/sh")).unwrap(),
-            b"real"
-        );
+        assert_eq!(fs::read(dir(&root, D1).unwrap().join("bin/sh")).unwrap(), b"real");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -741,10 +541,7 @@ mod tests {
         assert!(present(&root, D1));
         assert!(!dir(&root, D2).unwrap().exists() && !marker(&root, D2).unwrap().exists());
         assert!(!root.join(&broken).exists(), "unmarked layer kept");
-        assert!(
-            !root.join(format!(".stale-{broken}-1")).exists()
-                && !root.join(format!(".tmp-{broken}")).exists()
-        );
+        assert!(!root.join(format!(".stale-{broken}-1")).exists() && !root.join(format!(".tmp-{broken}")).exists());
         assert!(root.join("other").is_file());
         let _ = fs::remove_dir_all(&root);
     }
@@ -759,29 +556,10 @@ mod tests {
         let bytes = b.into_inner().unwrap();
         // As in receive(): a layer that fails is discarded, never reused.
         let capped = scratch("cap");
-        assert!(
-            untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: 1024
-                },
-                &capped
-            )
-            .is_err()
-        );
+        assert!(untar(Capped { inner: &bytes[..], left: 1024 }, &capped).is_err());
         let _ = fs::remove_dir_all(&capped);
         let fresh = scratch("cap-ok");
-        assert_eq!(
-            untar(
-                Capped {
-                    inner: &bytes[..],
-                    left: u64::MAX
-                },
-                &fresh
-            )
-            .unwrap(),
-            4096
-        );
+        assert_eq!(untar(Capped { inner: &bytes[..], left: u64::MAX }, &fresh).unwrap(), 4096);
         let _ = fs::remove_dir_all(&fresh);
         assert_eq!(expansion_cap(1), 1 << 30);
         assert_eq!(expansion_cap(1 << 40), 64 << 30);

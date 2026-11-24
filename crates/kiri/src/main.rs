@@ -26,6 +26,8 @@ mod buildwith;
 mod bridge;
 // Linux only (WSL's end of kiri-win's proxy relay); its tests run anywhere.
 #[cfg(unix)]
+mod hostrelay;
+#[cfg(unix)]
 mod cli_pins;
 #[cfg(unix)]
 mod client;
@@ -36,13 +38,11 @@ mod diag;
 #[cfg(any(unix, windows))]
 mod docker;
 mod flavor;
+mod images;
 #[cfg(unix)]
 mod guest;
 #[cfg(target_os = "linux")]
 mod hostaccess;
-#[cfg(unix)]
-mod hostrelay;
-mod images;
 #[cfg(target_os = "macos")]
 mod import;
 #[cfg(unix)]
@@ -59,21 +59,21 @@ mod run;
 mod scan;
 #[cfg(target_os = "macos")]
 mod setup;
-#[cfg(any(unix, windows))]
-mod share;
+#[cfg(unix)]
+mod usb;
 #[cfg(unix)]
 mod stale;
+#[cfg(windows)]
+mod wsl;
+#[cfg(any(unix, windows))]
+mod share;
+#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "window")))]
+mod ui;
 #[cfg(unix)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod tools;
-#[cfg(any(target_os = "macos", all(target_os = "linux", feature = "window")))]
-mod ui;
 #[cfg(target_os = "macos")]
 mod update;
-#[cfg(unix)]
-mod usb;
-#[cfg(windows)]
-mod wsl;
 
 const USAGE: &str = "\
 usage: kiri COMMAND          docker's commands, on Kiri: kiri run, ps, exec,
@@ -163,16 +163,11 @@ fn main() -> ExitCode {
         Some("diag") => diag::run(&args[1..]),
         // Opening Kiri.app: set up on first launch, then the window.
         #[cfg(target_os = "macos")]
-        None if setup::launched_from_app() => {
-            setup::first_launch().and_then(|()| ui::run(true, None))
-        }
+        None if setup::launched_from_app() => setup::first_launch().and_then(|()| ui::run(true, None)),
         #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "window")))]
         Some("ui") => ui::run(
             args.iter().any(|a| a == "--start"),
-            args.iter()
-                .position(|a| a == "--view")
-                .and_then(|i| args.get(i + 1))
-                .cloned(),
+            args.iter().position(|a| a == "--view").and_then(|i| args.get(i + 1)).cloned(),
         ),
         // The static engine has no window: the package's own build of it.
         #[cfg(all(target_os = "linux", not(feature = "window")))]
@@ -197,16 +192,7 @@ fn main() -> ExitCode {
             #[cfg(unix)]
             if !e.to_string().starts_with("usage:") {
                 // Opened from Finder or the Dock there is none: "open" (#250).
-                diag::warn!(
-                    "command failed",
-                    command = args
-                        .first()
-                        .map_or(Some("open"), |a| (a.len() <= 20
-                            && a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-                        .then_some(a.as_str()))
-                        .unwrap_or(""),
-                    error = e
-                );
+                diag::warn!("command failed", command = args.first().map_or(Some("open"), |a| (a.len() <= 20 && a.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')).then_some(a.as_str())).unwrap_or(""), error = e);
             }
             eprintln!("kiri: {e}");
             ExitCode::FAILURE
@@ -245,19 +231,9 @@ fn engine_version_check() {
     if me == "0.0.0" || !client::alive() {
         return;
     }
-    let Some(engine) = client::request("GET", "/version", None)
-        .ok()
-        .filter(|r| r.ok())
-        .and_then(|r| client::kiri_version(&r.json()).map(str::to_owned))
-    else {
-        return;
-    };
+    let Some(engine) = client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| client::kiri_version(&r.json()).map(str::to_owned)) else { return };
     if engine != me && engine != "0.0.0" {
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "kiri".into());
-        eprintln!(
-            "kiri: this kiri ({exe}) is {me}, but the engine runs {engine}. Restart the engine to use one version (Kiri → Restart engine), or remove the older kiri."
-        );
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "kiri".into());
+        eprintln!("kiri: this kiri ({exe}) is {me}, but the engine runs {engine}. Restart the engine to use one version (Kiri → Restart engine), or remove the older kiri.");
     }
 }

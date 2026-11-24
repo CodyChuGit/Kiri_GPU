@@ -52,10 +52,7 @@ fn source() -> PathBuf {
 fn digest(path: &Path) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(path)?;
-    Ok(Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Whether the installed helper was copied from this Kiri. (Not compared
@@ -64,10 +61,7 @@ fn current() -> bool {
     if !binary().exists() || !plist().exists() {
         return false;
     }
-    let (Ok(me), Ok(installed)) = (std::env::current_exe(), std::fs::read_to_string(source()))
-    else {
-        return false;
-    };
+    let (Ok(me), Ok(installed)) = (std::env::current_exe(), std::fs::read_to_string(source())) else { return false };
     digest(&me).is_ok_and(|d| d == installed.trim())
 }
 
@@ -115,10 +109,7 @@ fn install() -> io::Result<()> {
         tmp = q(&tmp),
         plist = q(&plist)
     );
-    let r = crate::setup::as_admin(
-        &command,
-        "Kiri wants to install its USB helper, so it can connect USB devices to its Linux VM. It asks once.",
-    );
+    let r = crate::setup::as_admin(&command, "Kiri wants to install its USB helper, so it can connect USB devices to its Linux VM. It asks once.");
     let _ = std::fs::remove_file(&tmp);
     r
 }
@@ -157,10 +148,7 @@ fn connect() -> io::Result<UnixStream> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(io::Error::other(format!(
-        "the USB helper isn't answering ({})",
-        last.map(|e| e.to_string()).unwrap_or_default()
-    )))
+    Err(io::Error::other(format!("the USB helper isn't answering ({})", last.map(|e| e.to_string()).unwrap_or_default())))
 }
 
 /// Attaches the device at `location`: the connection to the daemon is made
@@ -175,27 +163,14 @@ pub fn attach(location: &str, name: &str, speed: u32, devid: u32) -> io::Result<
 /// already this Kiri's.
 pub fn reattach(location: &str, name: &str, speed: u32, devid: u32) -> io::Result<()> {
     if !current() {
-        return Err(io::Error::other(
-            "the USB helper is not this Kiri's (attach it once from the window to update it)",
-        ));
+        return Err(io::Error::other("the USB helper is not this Kiri's (attach it once from the window to update it)"));
     }
     attach_through(UnixStream::connect(socket())?, location, name, speed, devid)
 }
 
-fn attach_through(
-    helper: UnixStream,
-    location: &str,
-    name: &str,
-    speed: u32,
-    devid: u32,
-) -> io::Result<()> {
-    let (stream, _reader) =
-        super::usbip::connect(&crate::client::socket()?, location, name, speed, devid)?;
-    send_fd(
-        &helper,
-        format!("attach {location}\n").as_bytes(),
-        stream.as_raw_fd(),
-    )?;
+fn attach_through(helper: UnixStream, location: &str, name: &str, speed: u32, devid: u32) -> io::Result<()> {
+    let (stream, _reader) = super::usbip::connect(&crate::client::socket()?, location, name, speed, devid)?;
+    send_fd(&helper, format!("attach {location}\n").as_bytes(), stream.as_raw_fd())?;
     // The helper and its server hold the connection now.
     drop(stream);
     helper.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -203,12 +178,8 @@ fn attach_through(
     BufReader::new(&helper).read_line(&mut line)?;
     match line.trim_end() {
         "ok" => Ok(()),
-        "" => Err(io::Error::other(
-            "the USB helper stopped before it took the device",
-        )),
-        l => Err(io::Error::other(
-            l.strip_prefix("error: ").unwrap_or(l).to_owned(),
-        )),
+        "" => Err(io::Error::other("the USB helper stopped before it took the device")),
+        l => Err(io::Error::other(l.strip_prefix("error: ").unwrap_or(l).to_owned())),
     }
 }
 
@@ -219,15 +190,10 @@ fn attach_through(
 pub fn serve(label: &str, uid: &str) -> io::Result<()> {
     // SAFETY: getuid has no preconditions.
     if unsafe { libc::getuid() } != 0 {
-        return Err(io::Error::other(
-            "the USB helper runs as root, under launchd",
-        ));
+        return Err(io::Error::other("the USB helper runs as root, under launchd"));
     }
     let uid: libc::uid_t = uid.parse().map_err(|_| io::Error::other("bad uid"))?;
-    if !label
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-    {
+    if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-') {
         return Err(io::Error::other("bad label"));
     }
     let path = PathBuf::from(format!("/var/run/{label}.sock"));
@@ -252,12 +218,7 @@ pub fn serve(label: &str, uid: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn request(
-    conn: &UnixStream,
-    uid: libc::uid_t,
-    exe: &Path,
-    sessions: &Arc<AtomicUsize>,
-) -> io::Result<()> {
+fn request(conn: &UnixStream, uid: libc::uid_t, exe: &Path, sessions: &Arc<AtomicUsize>) -> io::Result<()> {
     let (mut peer_uid, mut peer_gid) = (0, 0);
     // SAFETY: getpeereid on a connected socket we own, writing two ids.
     if unsafe { libc::getpeereid(conn.as_raw_fd(), &mut peer_uid, &mut peer_gid) } != 0 {
@@ -269,24 +230,16 @@ fn request(
     conn.set_read_timeout(Some(Duration::from_secs(10)))?;
     let (line, fd) = recv_fd(conn)?;
     let line = String::from_utf8_lossy(&line).into_owned();
-    let Some(location) = line.trim_end().strip_prefix("attach ") else {
-        return Err(io::Error::other("unknown request"));
-    };
-    let Some(fd) = fd else {
-        return Err(io::Error::other("no connection came with the request"));
-    };
-    let valid = location
-        .strip_prefix("0x")
-        .is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let Some(location) = line.trim_end().strip_prefix("attach ") else { return Err(io::Error::other("unknown request")) };
+    let Some(fd) = fd else { return Err(io::Error::other("no connection came with the request")) };
+    let valid = location.strip_prefix("0x").is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.bytes().all(|b| b.is_ascii_hexdigit()));
     if !valid {
         return Err(io::Error::other(format!("bad location {location:?}")));
     }
     // The connection must be a socket: the server speaks USB/IP over it.
     // SAFETY: fstat into a zeroed stat.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0
-        || st.st_mode & libc::S_IFMT != libc::S_IFSOCK
-    {
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 || st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return Err(io::Error::other("the connection isn't a socket"));
     }
     if sessions.fetch_add(1, Ordering::SeqCst) >= MAX_SESSIONS {
@@ -309,12 +262,7 @@ fn request(
 
 /// `kiri usb serve LOCATION --fd 3 --status 4`, with the USB/IP
 /// connection as fd 3 and the requester's connection as fd 4 for its "ok".
-fn spawn(
-    exe: &Path,
-    location: &str,
-    conn: OwnedFd,
-    status: UnixStream,
-) -> io::Result<std::process::Child> {
+fn spawn(exe: &Path, location: &str, conn: OwnedFd, status: UnixStream) -> io::Result<std::process::Child> {
     let (a, b) = (conn.as_raw_fd(), status.as_raw_fd());
     let mut cmd = Command::new(exe);
     cmd.args(["usb", "serve", location, "--fd", "3", "--status", "4"])
@@ -347,10 +295,7 @@ fn spawn(
 fn send_fd(sock: &UnixStream, data: &[u8], fd: RawFd) -> io::Result<()> {
     let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
     let mut control = vec![0u8; space];
-    let mut iov = libc::iovec {
-        iov_base: data.as_ptr() as *mut _,
-        iov_len: data.len(),
-    };
+    let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() };
     // SAFETY: a msghdr over buffers that outlive the call, with one
     // SCM_RIGHTS header written inside `control`.
     unsafe {
@@ -376,10 +321,7 @@ fn recv_fd(sock: &UnixStream) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
     let mut buf = vec![0u8; 256];
     let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
     let mut control = vec![0u8; space];
-    let mut iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast(),
-        iov_len: buf.len(),
-    };
+    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
     let mut fd = None;
     // SAFETY: recvmsg into buffers we own; only SCM_RIGHTS headers that fit
     // are read, and each descriptor received is owned from here on.
@@ -396,8 +338,7 @@ fn recv_fd(sock: &UnixStream) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
         let mut c = libc::CMSG_FIRSTHDR(&msg);
         while !c.is_null() {
             if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
-                let count = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
-                    / std::mem::size_of::<RawFd>();
+                let count = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
                 for i in 0..count {
                     let raw = std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<RawFd>().add(i));
                     let owned = OwnedFd::from_raw_fd(raw);

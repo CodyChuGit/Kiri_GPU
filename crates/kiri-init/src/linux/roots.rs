@@ -101,8 +101,7 @@ pub fn acquire(paths: &Paths, id: &str, layers: &[&str]) -> io::Result<PathBuf> 
     if !TABLE.with_borrow_mut(|t| t.take(&base)) {
         return Ok(base.join("rootfs"));
     }
-    container::mount_rootfs(paths, id, layers)
-        .inspect_err(|_| TABLE.with_borrow_mut(|t| t.forget(&base)))
+    container::mount_rootfs(paths, id, layers).inspect_err(|_| TABLE.with_borrow_mut(|t| t.forget(&base)))
 }
 
 /// Holds a root that is mounted now (a running container's), for a copy
@@ -161,11 +160,7 @@ mod tests {
         assert!(t.take(a), "the container starts: it mounts");
         assert!(!t.take(a), "a copy meanwhile uses the same mount");
         assert_eq!(t.give(a), Some(Left::InUse), "the copy ends: still running");
-        assert_eq!(
-            t.give(a),
-            Some(Left::Unmount { remove: false }),
-            "the container exits"
-        );
+        assert_eq!(t.give(a), Some(Left::Unmount { remove: false }), "the container exits");
         assert_eq!(t.give(a), None, "nothing left to let go");
         assert!(t.take(a), "a later start mounts again");
     }
@@ -187,15 +182,8 @@ mod tests {
         assert!(!t.hold(a), "nothing mounted: nothing to hold");
         t.take(a);
         assert!(t.hold(a));
-        assert_eq!(
-            t.give(a),
-            Some(Left::InUse),
-            "the container exits: the copy still writes"
-        );
-        assert!(
-            !t.take(a),
-            "the restart shares it instead of mounting again"
-        );
+        assert_eq!(t.give(a), Some(Left::InUse), "the container exits: the copy still writes");
+        assert!(!t.take(a), "the restart shares it instead of mounting again");
         assert_eq!(t.give(a), Some(Left::InUse));
         assert_eq!(t.give(a), Some(Left::Unmount { remove: false }));
     }

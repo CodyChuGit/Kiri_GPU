@@ -53,32 +53,17 @@ impl Router {
     /// error when fewer than `min` (at least one) could be bound, so a
     /// router never comes back on IPv6 alone while a container has IPv4.
     fn listen(self: &Arc<Self>, min: usize) -> io::Result<Vec<(OwnedFd, JoinHandle<()>)>> {
-        let listeners: Vec<TcpListener> = router_addrs(self.port)
-            .iter()
-            .filter_map(|a| TcpListener::bind(a).ok())
-            .collect();
+        let listeners: Vec<TcpListener> = router_addrs(self.port).iter().filter_map(|a| TcpListener::bind(a).ok()).collect();
         if listeners.len() < min.max(1) {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("port {} is taken", self.port),
-            ));
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, format!("port {} is taken", self.port)));
         }
         let mut out = Vec::new();
         for listener in listeners {
             listener.set_nonblocking(true)?;
             let (wake_r, wake_w) = super::ports::pipe()?;
             let me = self.clone();
-            let name = if self.tls.is_some() {
-                "kiri-domains-tls"
-            } else {
-                "kiri-domains"
-            };
-            out.push((
-                wake_w,
-                std::thread::Builder::new()
-                    .name(name.into())
-                    .spawn(move || me.accept(&listener, &wake_r))?,
-            ));
+            let name = if self.tls.is_some() { "kiri-domains-tls" } else { "kiri-domains" };
+            out.push((wake_w, std::thread::Builder::new().name(name.into()).spawn(move || me.accept(&listener, &wake_r))?));
         }
         Ok(out)
     }
@@ -87,16 +72,8 @@ impl Router {
     fn accept(&self, listener: &TcpListener, wake: &OwnedFd) {
         loop {
             let mut fds = [
-                libc::pollfd {
-                    fd: listener.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: wake.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
+                libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
             ];
             // SAFETY: polling two descriptors we own.
             if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
@@ -113,22 +90,19 @@ impl Router {
                 // A client that never finishes its request must not hold a thread forever.
                 let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
                 let (engine, tls) = (self.engine.clone(), self.tls.clone());
-                let _ = std::thread::Builder::new()
-                    .name("kiri-domain-conn".into())
-                    .spawn(move || {
-                        let _ = match tls {
-                            Some(config) => serve_tls(conn, &engine, config),
-                            None => serve(conn, &engine),
-                        };
-                    });
+                let _ = std::thread::Builder::new().name("kiri-domain-conn".into()).spawn(move || {
+                    let _ = match tls {
+                        Some(config) => serve_tls(conn, &engine, config),
+                        None => serve(conn, &engine),
+                    };
+                });
             }
         }
     }
 
     /// Stops serving; returns once every listener is closed.
     fn stop(&self) -> bool {
-        let threads =
-            std::mem::take(&mut *self.serving.lock().unwrap_or_else(PoisonError::into_inner));
+        let threads = std::mem::take(&mut *self.serving.lock().unwrap_or_else(PoisonError::into_inner));
         let stopped = !threads.is_empty();
         for (wake, thread) in threads {
             drop(wake);
@@ -144,20 +118,11 @@ impl Router {
 /// that port pause meanwhile; the router takes the port back once it is
 /// free (`reclaim`). Other routers, and other ports, are left alone.
 pub fn step_aside(port: u16) -> bool {
-    let routers: Vec<Arc<Router>> = ROUTERS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .filter(|r| r.port == port)
-        .cloned()
-        .collect();
+    let routers: Vec<Arc<Router>> = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|r| r.port == port).cloned().collect();
     let mut stepped = false;
     for r in routers {
         if r.stop() {
-            crate::diag::info!(
-                "a container publishes the container-domain router's port: the router lets it go until it is free",
-                port = port
-            );
+            crate::diag::info!("a container publishes the container-domain router's port: the router lets it go until it is free", port = port);
             stepped = true;
         }
     }
@@ -168,28 +133,14 @@ pub fn step_aside(port: u16) -> bool {
 fn reclaim() {
     loop {
         std::thread::sleep(RECLAIM_EVERY);
-        let idle: Vec<Arc<Router>> = ROUTERS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter(|r| {
-                r.serving
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_empty()
-            })
-            .cloned()
-            .collect();
+        let idle: Vec<Arc<Router>> = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|r| r.serving.lock().unwrap_or_else(PoisonError::into_inner).is_empty()).cloned().collect();
         for r in idle {
             let mut serving = r.serving.lock().unwrap_or_else(PoisonError::into_inner);
             if serving.is_empty()
                 && let Ok(threads) = r.listen(r.want.load(std::sync::atomic::Ordering::Relaxed))
             {
                 *serving = threads;
-                crate::diag::info!(
-                    "the container-domain router has its port again",
-                    port = r.port
-                );
+                crate::diag::info!("the container-domain router has its port again", port = r.port);
             }
         }
     }
@@ -199,55 +150,25 @@ fn reclaim() {
 fn register(router: Arc<Router>) -> io::Result<()> {
     let mut routers = ROUTERS.lock().unwrap_or_else(PoisonError::into_inner);
     if routers.is_empty() {
-        std::thread::Builder::new()
-            .name("kiri-domains-reclaim".into())
-            .spawn(reclaim)?;
+        std::thread::Builder::new().name("kiri-domains-reclaim".into()).spawn(reclaim)?;
     }
     routers.push(router);
     Ok(())
 }
 
 /// A router on `port`, listening; an error when the port is taken.
-fn bind_router(
-    engine: Arc<Engine>,
-    port: u16,
-    tls: Option<Arc<rustls::ServerConfig>>,
-) -> io::Result<Arc<Router>> {
-    let router = Arc::new(Router {
-        port,
-        engine,
-        tls,
-        want: 0.into(),
-        serving: Mutex::new(Vec::new()),
-    });
+fn bind_router(engine: Arc<Engine>, port: u16, tls: Option<Arc<rustls::ServerConfig>>) -> io::Result<Arc<Router>> {
+    let router = Arc::new(Router { port, engine, tls, want: 0.into(), serving: Mutex::new(Vec::new()) });
     let threads = router.listen(1)?;
-    router
-        .want
-        .store(threads.len(), std::sync::atomic::Ordering::Relaxed);
-    *router
-        .serving
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = threads;
+    router.want.store(threads.len(), std::sync::atomic::Ordering::Relaxed);
+    *router.serving.lock().unwrap_or_else(PoisonError::into_inner) = threads;
     Ok(router)
 }
 
-fn start_router(
-    engine: Arc<Engine>,
-    kind: Kind,
-    tls: Option<Arc<rustls::ServerConfig>>,
-) -> io::Result<u16> {
+fn start_router(engine: Arc<Engine>, kind: Kind, tls: Option<Arc<rustls::ServerConfig>>) -> io::Result<u16> {
     let port = kind.port();
-    let how = if env_port(kind.var()).is_some() {
-        format!("set {}", kind.var())
-    } else {
-        "pick another in Settings → Domains".into()
-    };
-    register(bind_router(engine, port, tls).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!("port {port} is taken; {how}"),
-        )
-    })?)?;
+    let how = if env_port(kind.var()).is_some() { format!("set {}", kind.var()) } else { "pick another in Settings → Domains".into() };
+    register(bind_router(engine, port, tls).map_err(|_| io::Error::new(io::ErrorKind::AddrInUse, format!("port {port} is taken; {how}")))?)?;
     Ok(port)
 }
 
@@ -293,26 +214,16 @@ impl Kind {
     /// The port it should use: the environment variable, then Settings →
     /// Domains (`~/.kiri/domains.json`), then 80 or 443.
     fn port(self) -> u16 {
-        env_port(self.var())
-            .or_else(|| saved_port(self))
-            .unwrap_or(self.default())
+        env_port(self.var()).or_else(|| saved_port(self)).unwrap_or(self.default())
     }
     /// The running router, serving or stepped aside.
     fn router(self) -> Option<Arc<Router>> {
-        ROUTERS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .find(|r| r.tls.is_some() == (self == Kind::Https))
-            .cloned()
+        ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|r| r.tls.is_some() == (self == Kind::Https)).cloned()
     }
 }
 
 fn env_port(var: &str) -> Option<u16> {
-    std::env::var(var)
-        .ok()
-        .and_then(|p| p.trim().parse().ok())
-        .filter(|&p| p != 0)
+    std::env::var(var).ok().and_then(|p| p.trim().parse().ok()).filter(|&p| p != 0)
 }
 
 /// Settings → Domains keeps the routers' ports here.
@@ -321,12 +232,8 @@ fn settings_path() -> Option<std::path::PathBuf> {
 }
 
 fn saved_port(kind: Kind) -> Option<u16> {
-    let v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
-    v[kind.key()]
-        .as_u64()
-        .and_then(|p| u16::try_from(p).ok())
-        .filter(|&p| p != 0)
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(settings_path()?).ok()?).ok()?;
+    v[kind.key()].as_u64().and_then(|p| u16::try_from(p).ok()).filter(|&p| p != 0)
 }
 
 /// Whether this engine has router ports of its own: Kiri Dev starts its
@@ -376,10 +283,7 @@ pub fn set_ports(engine: &Arc<Engine>, http: u16, https: u16) -> Result<serde_js
         if let Some(p) = env_port(kind.var())
             && p != want
         {
-            return Err(format!(
-                "{} sets this port to {p}; remove it to choose the port here",
-                kind.var()
-            ));
+            return Err(format!("{} sets this port to {p}; remove it to choose the port here", kind.var()));
         }
         let old = kind.router();
         if old.as_ref().is_some_and(|r| r.port == want) {
@@ -401,10 +305,7 @@ pub fn set_ports(engine: &Arc<Engine>, http: u16, https: u16) -> Result<serde_js
     }
     for (old, new) in moves {
         if let Some(old) = old {
-            ROUTERS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .retain(|r| !Arc::ptr_eq(r, &old));
+            ROUTERS.lock().unwrap_or_else(PoisonError::into_inner).retain(|r| !Arc::ptr_eq(r, &old));
             old.stop();
         }
         let port = new.port;
@@ -413,12 +314,9 @@ pub fn set_ports(engine: &Arc<Engine>, http: u16, https: u16) -> Result<serde_js
     }
     let path = settings_path().ok_or("HOME is not set")?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::json!({"http": http, "https": https}).to_string(),
-    )
-    .and_then(|()| std::fs::rename(&tmp, &path))
-    .map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, serde_json::json!({"http": http, "https": https}).to_string())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| e.to_string())?;
     Ok(report())
 }
 
@@ -428,21 +326,17 @@ fn serve(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
         return Ok(());
     }
     client.set_nodelay(true)?;
-    let Some((head, guest)) = route(&mut client, engine, "http")? else {
-        return Ok(());
-    };
+    let Some((head, guest)) = route(&mut client, engine, "http")? else { return Ok(()) };
     let mut to_guest = std::fs::File::from(guest.fd.try_clone()?);
     // What the client sent so far goes first, unchanged.
     to_guest.write_all(&head)?;
     let mut from_guest = std::fs::File::from(guest.fd.try_clone()?);
     let mut client_read = client.try_clone()?;
-    let up = std::thread::Builder::new()
-        .name("kiri-domain-up".into())
-        .spawn(move || {
-            let _ = io::copy(&mut client_read, &mut to_guest);
-            // SAFETY: half-closing a socket we own.
-            unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
-        })?;
+    let up = std::thread::Builder::new().name("kiri-domain-up".into()).spawn(move || {
+        let _ = io::copy(&mut client_read, &mut to_guest);
+        // SAFETY: half-closing a socket we own.
+        unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+    })?;
     let _ = io::copy(&mut from_guest, &mut client);
     let _ = client.shutdown(Shutdown::Write);
     let _ = up.join();
@@ -453,11 +347,7 @@ fn serve(mut client: TcpStream, engine: &Engine) -> io::Result<()> {
 /// Reads the request head, finds the container its Host names and connects
 /// to it. `None` once it has answered by itself (no such container, an
 /// unreachable one, or a client that went away).
-fn route(
-    client: &mut impl ReadWrite,
-    engine: &Engine,
-    scheme: &str,
-) -> io::Result<Option<(Vec<u8>, kiri_vmm::VsockStream)>> {
+fn route(client: &mut impl ReadWrite, engine: &Engine, scheme: &str) -> io::Result<Option<(Vec<u8>, kiri_vmm::VsockStream)>> {
     let mut head = Vec::with_capacity(2048);
     let mut buf = [0u8; 4096];
     let end = loop {
@@ -477,30 +367,15 @@ fn route(
     let text = String::from_utf8_lossy(&head[..end]);
     let host = text
         .lines()
-        .find_map(|l| {
-            l.split_once(':')
-                .filter(|(k, _)| k.eq_ignore_ascii_case("host"))
-                .map(|(_, v)| v.trim().to_owned())
-        })
+        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("host")).map(|(_, v)| v.trim().to_owned()))
         .unwrap_or_default();
     let Some(target) = engine.route(&host) else {
-        let list: String = engine
-            .domains()
-            .iter()
-            .map(|d| {
-                let d = escape(d);
-                format!("<li><a href=\"{scheme}://{d}\">{d}</a></li>")
-            })
-            .collect();
+        let list: String = engine.domains().iter().map(|d| { let d = escape(d); format!("<li><a href=\"{scheme}://{d}\">{d}</a></li>") }).collect();
         let body = format!(
             "<!doctype html><meta charset=utf-8><title>Kiri</title><body style=\"font:15px -apple-system,sans-serif;margin:40px\">\
              <h1>No running container for {}</h1><p>Running containers:</p><ul>{}</ul>",
             escape(&host),
-            if list.is_empty() {
-                "<li>none</li>".to_owned()
-            } else {
-                list
-            }
+            if list.is_empty() { "<li>none</li>".to_owned() } else { list }
         );
         respond(client, 404, "Not Found", &body)?;
         return Ok(None);
@@ -509,15 +384,7 @@ fn route(
     match engine.relay_to(target.ip, port) {
         Ok(g) => Ok(Some((head, g))),
         Err(e) => {
-            respond(
-                client,
-                502,
-                "Bad Gateway",
-                &format!(
-                    "Kiri could not reach the container: {}",
-                    escape(&e.to_string())
-                ),
-            )?;
+            respond(client, 502, "Bad Gateway", &format!("Kiri could not reach the container: {}", escape(&e.to_string())))?;
             Ok(None)
         }
     }
@@ -537,13 +404,9 @@ pub struct Target {
 }
 
 /// Ports web servers usually listen on, most likely first.
-const WEB_PORTS: [u16; 14] = [
-    80, 8080, 3000, 8000, 5000, 5173, 4200, 8888, 9000, 8081, 4000, 3001, 15672, 8443,
-];
+const WEB_PORTS: [u16; 14] = [80, 8080, 3000, 8000, 5000, 5173, 4200, 8888, 9000, 8081, 4000, 3001, 15672, 8443];
 /// Ports that are surely not a web page: databases, queues, caches.
-const NOT_WEB: [u16; 12] = [
-    5432, 3306, 6379, 27017, 5672, 4369, 25672, 9042, 11211, 1433, 1521, 2181,
-];
+const NOT_WEB: [u16; 12] = [5432, 3306, 6379, 27017, 5672, 4369, 25672, 9042, 11211, 1433, 1521, 2181];
 
 /// The ports that could be the web port, best first, and whether the first
 /// is certain (the label, or the only port published): published ports
@@ -553,16 +416,7 @@ fn candidates(t: &Target) -> (Vec<u16>, bool) {
     if let Some(p) = t.label {
         return (vec![p], true);
     }
-    let rank = |p: &u16| {
-        WEB_PORTS
-            .iter()
-            .position(|w| w == p)
-            .unwrap_or(if NOT_WEB.contains(p) {
-                usize::MAX
-            } else {
-                WEB_PORTS.len()
-            })
-    };
+    let rank = |p: &u16| WEB_PORTS.iter().position(|w| w == p).unwrap_or(if NOT_WEB.contains(p) { usize::MAX } else { WEB_PORTS.len() });
     let sorted = |v: &[u16]| {
         let mut v = v.to_vec();
         v.sort_unstable_by_key(|p| (rank(p), *p));
@@ -571,31 +425,19 @@ fn candidates(t: &Target) -> (Vec<u16>, bool) {
     };
     let mut out = sorted(&t.published);
     let sure = out.len() == 1;
-    out.extend(
-        sorted(&t.exposed)
-            .into_iter()
-            .filter(|p| !t.published.contains(p)),
-    );
+    out.extend(sorted(&t.exposed).into_iter().filter(|p| !t.published.contains(p)));
     (out, sure)
 }
 
 /// Of the candidates, the first the container listens on; with none
 /// declared, the best port it listens on; else the first, or 80.
 fn choose(cands: &[u16], listening: Option<&[u16]>) -> u16 {
-    let Some(on) = listening.filter(|l| !l.is_empty()) else {
-        return cands.first().copied().unwrap_or(80);
-    };
+    let Some(on) = listening.filter(|l| !l.is_empty()) else { return cands.first().copied().unwrap_or(80) };
     if let Some(p) = cands.iter().find(|p| on.contains(p)) {
         return *p;
     }
     if cands.is_empty() {
-        let (best, _) = candidates(&Target {
-            ip: [0; 4],
-            id: String::new(),
-            label: None,
-            published: Vec::new(),
-            exposed: on.to_vec(),
-        });
+        let (best, _) = candidates(&Target { ip: [0; 4], id: String::new(), label: None, published: Vec::new(), exposed: on.to_vec() });
         return best[0];
     }
     cands[0]
@@ -614,12 +456,7 @@ fn web_port(engine: &Engine, t: &Target) -> u16 {
         return cands[0];
     }
     let fresh = |at: Instant| at.elapsed() < Duration::from_secs(10);
-    if let Some(&(at, p)) = SEEN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(HashMap::new)
-        .get(&t.id)
-    {
+    if let Some(&(at, p)) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&t.id) {
         if fresh(at) {
             return p;
         }
@@ -643,8 +480,7 @@ fn serve_tls(tcp: TcpStream, engine: &Engine, config: Arc<rustls::ServerConfig>)
         return Ok(());
     }
     tcp.set_nodelay(true)?;
-    let conn =
-        rustls::ServerConnection::new(config).map_err(|e| io::Error::other(e.to_string()))?;
+    let conn = rustls::ServerConnection::new(config).map_err(|e| io::Error::other(e.to_string()))?;
     let mut tls = rustls::StreamOwned::new(conn, tcp);
     let Some((head, guest)) = route(&mut tls, engine, "https")? else {
         tls.conn.send_close_notify();
@@ -680,16 +516,8 @@ fn serve_tls(tcp: TcpStream, engine: &Engine, config: Arc<rustls::ServerConfig>)
             conn.write_tls(sock)?;
         }
         let mut fds = [
-            libc::pollfd {
-                fd: sock.as_raw_fd(),
-                events: if client_open { libc::POLLIN } else { 0 },
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: container.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            },
+            libc::pollfd { fd: sock.as_raw_fd(), events: if client_open { libc::POLLIN } else { 0 }, revents: 0 },
+            libc::pollfd { fd: container.as_raw_fd(), events: libc::POLLIN, revents: 0 },
         ];
         // SAFETY: two valid pollfds, owned for the call.
         if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
@@ -699,8 +527,7 @@ fn serve_tls(tcp: TcpStream, engine: &Engine, config: Arc<rustls::ServerConfig>)
             }
             return Err(e);
         }
-        let ready =
-            |f: &libc::pollfd| f.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0;
+        let ready = |f: &libc::pollfd| f.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0;
         if client_open && ready(&fds[0]) {
             match conn.read_tls(sock) {
                 Ok(0) | Err(_) => {
@@ -742,47 +569,28 @@ fn respond(client: &mut impl Write, status: u16, reason: &str, body: &str) -> io
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Target, candidates, choose};
+    use super::{candidates, choose, Target};
 
     fn t(label: Option<u16>, published: &[u16], exposed: &[u16]) -> Target {
-        Target {
-            ip: [0; 4],
-            id: String::new(),
-            label,
-            published: published.to_vec(),
-            exposed: exposed.to_vec(),
-        }
+        Target { ip: [0; 4], id: String::new(), label, published: published.to_vec(), exposed: exposed.to_vec() }
     }
 
     #[test]
     fn the_port_published_wins_over_the_ones_declared() {
         // `-p 8080:3000` on an image that declares 80.
-        assert_eq!(
-            candidates(&t(None, &[3000], &[80, 3000])),
-            (vec![3000, 80], true)
-        );
-        assert_eq!(
-            candidates(&t(Some(9000), &[3000], &[80])),
-            (vec![9000], true)
-        );
+        assert_eq!(candidates(&t(None, &[3000], &[80, 3000])), (vec![3000, 80], true));
+        assert_eq!(candidates(&t(Some(9000), &[3000], &[80])), (vec![9000], true));
     }
 
     #[test]
     fn several_ports_put_web_ports_first_and_databases_last() {
         // rabbitmq:management with -P.
-        let (c, sure) = candidates(&t(
-            None,
-            &[4369, 5671, 5672, 15671, 15672, 15691, 15692, 25672],
-            &[],
-        ));
+        let (c, sure) = candidates(&t(None, &[4369, 5671, 5672, 15671, 15672, 15691, 15692, 25672], &[]));
         assert!(!sure);
         assert_eq!(c[0], 15672);
         assert_eq!(&c[c.len() - 3..], &[4369, 5672, 25672]);

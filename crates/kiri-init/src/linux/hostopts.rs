@@ -65,16 +65,10 @@ pub struct HostOpts {
     pub groups: Vec<String>,
     /// What CDI specs' hooks ask for (`cdi` lines).
     pub cdi: super::cdi::Cdi,
-    /// `/proc/self/oom_score_adj` for the container's processes (`oom`
-    /// line); `None` leaves the agent's own value, which they inherit.
-    pub oom_score_adj: Option<i32>,
 }
 
 fn bad(line: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("bad host option {line:?}"),
-    )
+    io::Error::new(io::ErrorKind::InvalidInput, format!("bad host option {line:?}"))
 }
 
 pub fn parse(list: StrList<'_>) -> io::Result<HostOpts> {
@@ -100,24 +94,13 @@ pub fn parse(list: StrList<'_>) -> io::Result<HostOpts> {
                 let first = path.split('/').next().unwrap_or("");
                 let allowed = match ns {
                     Ns::Net => first == "net",
-                    Ns::Ipc => {
-                        (first == "kernel" && path.split('/').count() == 2)
-                            || path.starts_with("fs/mqueue/")
-                    }
+                    Ns::Ipc => (first == "kernel" && path.split('/').count() == 2) || path.starts_with("fs/mqueue/"),
                     Ns::Uts => *path == "kernel/domainname",
                 };
-                if !allowed
-                    || path
-                        .split('/')
-                        .any(|c| c.is_empty() || c == "." || c == "..")
-                {
+                if !allowed || path.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
                     return Err(bad(line));
                 }
-                o.sysctls.push(Sysctl {
-                    ns,
-                    path: (*path).to_owned(),
-                    value: (*value).to_owned(),
-                });
+                o.sysctls.push(Sysctl { ns, path: (*path).to_owned(), value: (*value).to_owned() });
             }
             ["device", host, container, perms] => {
                 for p in [host, container] {
@@ -126,45 +109,20 @@ pub fn parse(list: StrList<'_>) -> io::Result<HostOpts> {
                     }
                 }
                 devices::access_bits(perms).ok_or_else(|| bad(line))?;
-                o.devices.push(Device {
-                    host: (*host).to_owned(),
-                    container: (*container).to_owned(),
-                    perms: (*perms).to_owned(),
-                });
+                o.devices.push(Device { host: (*host).to_owned(), container: (*container).to_owned(), perms: (*perms).to_owned() });
             }
-            ["devrule", kind, major, minor, perms] => o
-                .rules
-                .push(devices::parse_rule(kind, major, minor, perms).ok_or_else(|| bad(line))?),
+            ["devrule", kind, major, minor, perms] => o.rules.push(devices::parse_rule(kind, major, minor, perms).ok_or_else(|| bad(line))?),
             ["group", g] if !g.is_empty() => o.groups.push((*g).to_owned()),
             ["cdi", rest @ ..] => o.cdi.add(rest).ok_or_else(|| bad(line))?,
-            ["oom", v] => {
-                let v: i32 = v.parse().map_err(|_| bad(line))?;
-                if !(-1000..=1000).contains(&v) {
-                    return Err(bad(line));
-                }
-                o.oom_score_adj = Some(v);
-            }
             _ => return Err(bad(line)),
         }
     }
     Ok(o)
 }
 
-/// Sets the calling process's OOM score adjustment. Run in the child before
-/// it enters the container, through the host's /proc: raising it needs no
-/// privilege, lowering it needs CAP_SYS_RESOURCE, which the child still has.
-pub fn set_oom_score_adj(v: Option<i32>) -> io::Result<()> {
-    match v {
-        Some(v) => fs::write("/proc/self/oom_score_adj", v.to_string()),
-        None => Ok(()),
-    }
-}
-
 /// Docker's error for a device it cannot add.
 fn gather_error(path: &str, e: impl std::fmt::Display) -> io::Error {
-    io::Error::other(format!(
-        "error gathering device information while adding custom device {path:?}: {e}"
-    ))
+    io::Error::other(format!("error gathering device information while adding custom device {path:?}: {e}"))
 }
 
 /// The nodes `--device` asks for and the rules that let the container use
@@ -173,8 +131,7 @@ pub fn resolve_devices(opts: &HostOpts) -> io::Result<(Vec<Node>, Vec<Rule>)> {
     let mut nodes = Vec::new();
     let mut rules = opts.rules.clone();
     for d in &opts.devices {
-        let access = devices::access_bits(&d.perms)
-            .unwrap_or(devices::MKNOD | devices::READ | devices::WRITE);
+        let access = devices::access_bits(&d.perms).unwrap_or(devices::MKNOD | devices::READ | devices::WRITE);
         let meta = fs::metadata(&d.host).map_err(|e| gather_error(&d.host, errno_text(&e)))?;
         let mut found = Vec::new();
         if meta.is_dir() {
@@ -186,26 +143,10 @@ pub fn resolve_devices(opts: &HostOpts) -> io::Result<(Vec<Node>, Vec<Rule>)> {
         }
         for (target, m) in found {
             let (major, minor) = (libc::major(m.rdev()) as u32, libc::minor(m.rdev()) as u32);
-            let kind = if m.file_type().is_block_device() {
-                1
-            } else {
-                2
-            };
-            rules.push(Rule {
-                kind,
-                major: Some(major),
-                minor: Some(minor),
-                access,
-            });
+            let kind = if m.file_type().is_block_device() { 1 } else { 2 };
+            rules.push(Rule { kind, major: Some(major), minor: Some(minor), access });
             let rel = target.trim_start_matches('/');
-            nodes.push(Node {
-                target: CString::new(rel).map_err(|_| gather_error(&d.host, "bad path"))?,
-                mode: m.mode(),
-                major,
-                minor,
-                uid: m.uid(),
-                gid: m.gid(),
-            });
+            nodes.push(Node { target: CString::new(rel).map_err(|_| gather_error(&d.host, "bad path"))?, mode: m.mode(), major, minor, uid: m.uid(), gid: m.gid() });
         }
     }
     Ok((nodes, rules))
@@ -213,13 +154,8 @@ pub fn resolve_devices(opts: &HostOpts) -> io::Result<(Vec<Node>, Vec<Rule>)> {
 
 /// Device nodes under `host`, each with its path under `container`.
 fn walk(host: &Path, container: &Path, out: &mut Vec<(String, fs::Metadata)>) -> io::Result<()> {
-    for e in fs::read_dir(host)
-        .map_err(|e| gather_error(&host.to_string_lossy(), errno_text(&e)))?
-        .flatten()
-    {
-        let Ok(m) = fs::metadata(e.path()) else {
-            continue;
-        };
+    for e in fs::read_dir(host).map_err(|e| gather_error(&host.to_string_lossy(), errno_text(&e)))?.flatten() {
+        let Ok(m) = fs::metadata(e.path()) else { continue };
         let target = container.join(e.file_name());
         if m.is_dir() {
             walk(&e.path(), &target, out)?;
@@ -236,11 +172,7 @@ fn walk(host: &Path, container: &Path, out: &mut Vec<(String, fs::Metadata)>) ->
 pub fn make_nodes(root: BorrowedFd<'_>, nodes: &[Node]) -> io::Result<()> {
     for n in nodes {
         let path = Path::new(std::ffi::OsStr::from_bytes(n.target.as_bytes()));
-        let at = super::inroot::open(
-            root,
-            path,
-            super::inroot::Last::Node(n.mode, libc::makedev(n.major, n.minor)),
-        )?;
+        let at = super::inroot::open(root, path, super::inroot::Last::Node(n.mode, libc::makedev(n.major, n.minor)))?;
         if !at.created {
             continue;
         }
@@ -259,10 +191,7 @@ pub fn make_nodes(root: BorrowedFd<'_>, nodes: &[Node]) -> io::Result<()> {
 /// own: a non-root process may listen on any port (nginx or Caddy on 80 as
 /// a user) and ping without CAP_NET_RAW. A `--sysctl` for the same key
 /// wins, as it does on Docker.
-const NET_DEFAULTS: [(&str, &str); 2] = [
-    ("net/ipv4/ip_unprivileged_port_start", "0"),
-    ("net/ipv4/ping_group_range", "0 2147483647"),
-];
+const NET_DEFAULTS: [(&str, &str); 2] = [("net/ipv4/ip_unprivileged_port_start", "0"), ("net/ipv4/ping_group_range", "0 2147483647")];
 
 /// Puts Docker's defaults first in `sysctls`, leaving out any key the
 /// container sets itself.
@@ -270,11 +199,7 @@ pub fn add_net_defaults(sysctls: &mut Vec<Sysctl>) {
     let defaults = NET_DEFAULTS
         .iter()
         .filter(|(path, _)| !sysctls.iter().any(|s| s.path == *path))
-        .map(|(path, value)| Sysctl {
-            ns: Ns::Net,
-            path: (*path).to_owned(),
-            value: (*value).to_owned(),
-        });
+        .map(|(path, value)| Sysctl { ns: Ns::Net, path: (*path).to_owned(), value: (*value).to_owned() });
     let mine: Vec<Sysctl> = defaults.collect();
     sysctls.splice(0..0, mine);
 }
@@ -298,10 +223,7 @@ pub fn apply_sysctls(pid: libc::pid_t, sysctls: &[Sysctl]) -> io::Result<()> {
         if same_namespace(&own, &theirs)? {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                format!(
-                    "sysctl {:?} not allowed in host {name} namespace",
-                    s.path.replace('/', ".")
-                ),
+                format!("sysctl {:?} not allowed in host {name} namespace", s.path.replace('/', ".")),
             ));
         }
         sys::setns(theirs.as_raw_fd(), kind)?;
@@ -311,16 +233,7 @@ pub fn apply_sysctls(pid: libc::pid_t, sysctls: &[Sysctl]) -> io::Result<()> {
             eprintln!("kiri-init: cannot leave a container's {name} namespace: {e}");
             std::process::abort();
         }
-        written.map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "write sysctl key {}: {}",
-                    s.path.replace('/', "."),
-                    errno_text(&e)
-                ),
-            )
-        })?;
+        written.map_err(|e| io::Error::new(e.kind(), format!("write sysctl key {}: {}", s.path.replace('/', "."), errno_text(&e))))?;
     }
     Ok(())
 }
@@ -337,21 +250,10 @@ pub fn set_rlimits(rlimits: &[(u32, u64, u64)]) -> io::Result<()> {
     for &(res, soft, hard) in rlimits {
         let lim = [soft, hard];
         // SAFETY: prlimit64 on ourselves with a valid { cur, max } pair of u64s.
-        let r = unsafe {
-            libc::syscall(
-                libc::SYS_prlimit64,
-                0,
-                res as libc::c_long,
-                lim.as_ptr(),
-                std::ptr::null_mut::<u64>(),
-            )
-        };
+        let r = unsafe { libc::syscall(libc::SYS_prlimit64, 0, res as libc::c_long, lim.as_ptr(), std::ptr::null_mut::<u64>()) };
         if r != 0 {
             let e = io::Error::last_os_error();
-            return Err(io::Error::new(
-                e.kind(),
-                format!("error setting rlimit type {res}: {}", errno_text(&e)),
-            ));
+            return Err(io::Error::new(e.kind(), format!("error setting rlimit type {res}: {}", errno_text(&e))));
         }
     }
     Ok(())
@@ -360,17 +262,11 @@ pub fn set_rlimits(rlimits: &[(u32, u64, u64)]) -> io::Result<()> {
 /// An errno as Go prints it (`no such file or directory`), for messages
 /// that match Docker's.
 pub fn errno_text(e: &io::Error) -> String {
-    let Some(n) = e.raw_os_error() else {
-        return e.to_string();
-    };
+    let Some(n) = e.raw_os_error() else { return e.to_string() };
     // SAFETY: strerror returns a valid NUL-terminated string for any errno.
-    let s = unsafe { std::ffi::CStr::from_ptr(libc::strerror(n)) }
-        .to_string_lossy()
-        .into_owned();
+    let s = unsafe { std::ffi::CStr::from_ptr(libc::strerror(n)) }.to_string_lossy().into_owned();
     let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_lowercase().chain(c).collect())
-        .unwrap_or(s)
+    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or(s)
 }
 
 /// The supplementary groups for a user, read from the container's
@@ -378,26 +274,14 @@ pub fn errno_text(e: &io::Error) -> String {
 /// user, unless the run named a group (`user:group`), then `--group-add`.
 pub fn supplementary_groups(user: &str, uid: u32, add: &[String]) -> io::Result<Vec<libc::gid_t>> {
     let group_file = fs::read_to_string("/etc/group").unwrap_or_default();
-    let groups: Vec<Vec<&str>> = group_file
-        .lines()
-        .map(|l| l.split(':').collect())
-        .filter(|f: &Vec<&str>| f.len() >= 3)
-        .collect();
+    let groups: Vec<Vec<&str>> = group_file.lines().map(|l| l.split(':').collect()).filter(|f: &Vec<&str>| f.len() >= 3).collect();
     let mut out = Vec::new();
-    let (name, group) = user
-        .split_once(':')
-        .map_or((user, None), |(u, g)| (u, Some(g)));
+    let (name, group) = user.split_once(':').map_or((user, None), |(u, g)| (u, Some(g)));
     if group.is_none() {
-        let name = if name.is_empty() || name.parse::<u32>().is_ok() {
-            user_name(uid)
-        } else {
-            Some(name.to_owned())
-        };
+        let name = if name.is_empty() || name.parse::<u32>().is_ok() { user_name(uid) } else { Some(name.to_owned()) };
         if let Some(name) = name {
             for f in &groups {
-                if f.get(3)
-                    .is_some_and(|members| members.split(',').any(|m| m.trim() == name))
-                {
+                if f.get(3).is_some_and(|members| members.split(',').any(|m| m.trim() == name)) {
                     if let Ok(gid) = f[2].parse() {
                         out.push(gid);
                     }
@@ -412,12 +296,7 @@ pub fn supplementary_groups(user: &str, uid: u32, add: &[String]) -> io::Result<
                 .iter()
                 .find(|f| f[0] == g)
                 .and_then(|f| f[2].parse().ok())
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("unable to find group {g}: no matching entries in group file"),
-                    )
-                })?,
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("unable to find group {g}: no matching entries in group file")))?,
         };
         out.push(gid);
     }
@@ -448,74 +327,27 @@ mod tests {
     fn a_container_gets_dockers_port_and_ping_defaults_unless_it_sets_them() {
         let mut none = Vec::new();
         add_net_defaults(&mut none);
-        let keys: Vec<(&str, &str)> = none
-            .iter()
-            .map(|s| (s.path.as_str(), s.value.as_str()))
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                ("net/ipv4/ip_unprivileged_port_start", "0"),
-                ("net/ipv4/ping_group_range", "0 2147483647")
-            ]
-        );
-        let mut own = vec![Sysctl {
-            ns: Ns::Net,
-            path: "net/ipv4/ip_unprivileged_port_start".into(),
-            value: "1024".into(),
-        }];
+        let keys: Vec<(&str, &str)> = none.iter().map(|s| (s.path.as_str(), s.value.as_str())).collect();
+        assert_eq!(keys, [("net/ipv4/ip_unprivileged_port_start", "0"), ("net/ipv4/ping_group_range", "0 2147483647")]);
+        let mut own = vec![Sysctl { ns: Ns::Net, path: "net/ipv4/ip_unprivileged_port_start".into(), value: "1024".into() }];
         add_net_defaults(&mut own);
-        let keys: Vec<(&str, &str)> = own
-            .iter()
-            .map(|s| (s.path.as_str(), s.value.as_str()))
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                ("net/ipv4/ping_group_range", "0 2147483647"),
-                ("net/ipv4/ip_unprivileged_port_start", "1024")
-            ],
-            "--sysctl wins"
-        );
+        let keys: Vec<(&str, &str)> = own.iter().map(|s| (s.path.as_str(), s.value.as_str())).collect();
+        assert_eq!(keys, [("net/ipv4/ping_group_range", "0 2147483647"), ("net/ipv4/ip_unprivileged_port_start", "1024")], "--sysctl wins");
     }
 
     #[test]
     fn parses_and_refuses() {
-        let buf = list(&[
-            "rlimit\t7\t65536\t65536",
-            "sysctl\tnet\tnet/core/somaxconn\t1024",
-            "device\t/dev/fuse\t/dev/fuse\trwm",
-            "devrule\tc\t10\t229\trwm",
-            "group\tvideo",
-            "oom\t-500",
-        ]);
-        let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else {
-            panic!()
-        };
+        let buf = list(&["rlimit\t7\t65536\t65536", "sysctl\tnet\tnet/core/somaxconn\t1024", "device\t/dev/fuse\t/dev/fuse\trwm", "devrule\tc\t10\t229\trwm", "group\tvideo"]);
+        let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else { panic!() };
         let o = parse(l).unwrap();
         assert_eq!(o.rlimits, [(7, 65536, 65536)]);
-        assert_eq!(
-            (o.sysctls[0].ns, o.sysctls[0].path.as_str()),
-            (Ns::Net, "net/core/somaxconn")
-        );
+        assert_eq!((o.sysctls[0].ns, o.sysctls[0].path.as_str()), (Ns::Net, "net/core/somaxconn"));
         assert_eq!(o.devices[0].container, "/dev/fuse");
         assert_eq!(o.rules.len(), 1);
         assert_eq!(o.groups, ["video"]);
-        assert_eq!(o.oom_score_adj, Some(-500));
-        for bad in [
-            "oom\t1001",
-            "oom\tx",
-            "sysctl\tnet\tkernel/core_pattern\t|x",
-            "sysctl\tipc\tkernel/../x\t1",
-            "sysctl\tuts\tkernel/hostname\tx",
-            "rlimit\t99\t1\t1",
-            "device\tdev\t/x\trwm",
-            "nope",
-        ] {
+        for bad in ["sysctl\tnet\tkernel/core_pattern\t|x", "sysctl\tipc\tkernel/../x\t1", "sysctl\tuts\tkernel/hostname\tx", "rlimit\t99\t1\t1", "device\tdev\t/x\trwm", "nope"] {
             let buf = list(&[bad]);
-            let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else {
-                panic!()
-            };
+            let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else { panic!() };
             assert!(parse(l).is_err(), "{bad}");
         }
     }
@@ -525,43 +357,10 @@ mod tests {
         // A "container" that is this very process shares every namespace.
         let me = std::process::id() as libc::pid_t;
         let own = fs::File::open("/proc/self/ns/net").unwrap();
-        assert!(
-            same_namespace(&own, &fs::File::open(format!("/proc/{me}/ns/net")).unwrap()).unwrap()
-        );
+        assert!(same_namespace(&own, &fs::File::open(format!("/proc/{me}/ns/net")).unwrap()).unwrap());
         assert!(!same_namespace(&own, &fs::File::open("/proc/self/ns/ipc").unwrap()).unwrap());
-        let s = Sysctl {
-            ns: Ns::Net,
-            path: "net/ipv4/ip_unprivileged_port_start".into(),
-            value: "77".into(),
-        };
+        let s = Sysctl { ns: Ns::Net, path: "net/ipv4/ip_unprivileged_port_start".into(), value: "77".into() };
         let e = apply_sysctls(me, &[s]).unwrap_err();
-        assert_eq!(
-            e.to_string(),
-            "sysctl \"net.ipv4.ip_unprivileged_port_start\" not allowed in host net namespace"
-        );
-    }
-
-    #[test]
-    fn oom_score_adj_is_written_for_the_calling_process() {
-        // Raising needs no privilege; run in a child so the test runner keeps its own.
-        let now = fs::read_to_string("/proc/self/oom_score_adj")
-            .unwrap()
-            .trim()
-            .parse::<i32>()
-            .unwrap();
-        let want = (now + 1).min(1000);
-        let out = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "echo {want} > /proc/self/oom_score_adj && cat /proc/self/oom_score_adj"
-            ))
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            want.to_string(),
-            "the kernel takes a raise"
-        );
-        assert!(set_oom_score_adj(None).is_ok());
+        assert_eq!(e.to_string(), "sysctl \"net.ipv4.ip_unprivileged_port_start\" not allowed in host net namespace");
     }
 }

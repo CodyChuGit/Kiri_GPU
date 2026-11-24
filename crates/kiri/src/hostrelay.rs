@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -73,10 +73,7 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, u32, Vec<u8>)>> {
     let id = u32::from_be_bytes([h[1], h[2], h[3], h[4]]);
     let len = u32::from_be_bytes([h[5], h[6], h[7], h[8]]) as usize;
     if len > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("frame of {len} bytes"),
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("frame of {len} bytes")));
     }
     let mut data = vec![0u8; len];
     r.read_exact(&mut data)?;
@@ -135,6 +132,7 @@ impl Conns {
             let _ = tx.send(op);
         }
     }
+
 }
 
 /// Joins `stream` to connection `id`: what it reads goes to the other end
@@ -229,9 +227,7 @@ pub fn listen_side(input: impl Read, out: &Out) -> io::Result<()> {
             conns.dispatch(kind, id, data);
             continue;
         }
-        let Some(target) = port_of(&data, 0) else {
-            continue;
-        };
+        let Some(target) = port_of(&data, 0) else { continue };
         let local = match listening.get(&target) {
             Some(&p) => p,
             None => {
@@ -270,12 +266,7 @@ fn listen(target: u16, conns: &Arc<Conns>, out: &Out, next: &Arc<AtomicU32>) -> 
 
 /// The Windows end: dials the proxy for each connection the WSL end sends,
 /// on the ports `allowed` names, and hands LISTENING replies to `listening`.
-pub fn dial_side(
-    input: impl Read,
-    out: &Out,
-    allowed: impl Fn(u16) -> bool,
-    listening: impl Fn(u16, u16),
-) -> io::Result<()> {
+pub fn dial_side(input: impl Read, out: &Out, allowed: impl Fn(u16) -> bool, listening: impl Fn(u16, u16)) -> io::Result<()> {
     let conns = Arc::new(Conns::default());
     let mut r = BufReader::with_capacity(CHUNK, input);
     while let Some((kind, id, data)) = read_frame(&mut r)? {
@@ -311,10 +302,7 @@ pub fn dial_side(
 /// This machine's loopback at `port`: IPv4, then IPv6.
 fn dial(port: u16) -> io::Result<TcpStream> {
     let wait = Duration::from_secs(5);
-    TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), wait).or_else(|e| {
-        TcpStream::connect_timeout(&(std::net::Ipv6Addr::LOCALHOST, port).into(), wait)
-            .map_err(|_| e)
-    })
+    TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), wait).or_else(|e| TcpStream::connect_timeout(&(std::net::Ipv6Addr::LOCALHOST, port).into(), wait).map_err(|_| e))
 }
 
 /// Where in a proxy address its host and port are, when the host is this
@@ -328,15 +316,8 @@ pub fn loopback(url: &str) -> Option<(u16, std::ops::Range<usize>)> {
     let hostport = &rest[at..end];
     let (host, port) = hostport.rsplit_once(':')?;
     let port: u16 = port.parse().ok().filter(|&p| p != 0)?;
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    let is_loopback = host == "localhost"
-        || host == "::1"
-        || host
-            .parse::<std::net::Ipv4Addr>()
-            .is_ok_and(|a| a.is_loopback());
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let is_loopback = host == "localhost" || host == "::1" || host.parse::<std::net::Ipv4Addr>().is_ok_and(|a| a.is_loopback());
     is_loopback.then_some((port, start + at..start + end))
 }
 
@@ -344,11 +325,7 @@ pub fn loopback(url: &str) -> Option<(u16, std::ops::Range<usize>)> {
 pub fn relayed(url: &str, map: &HashMap<u16, u16>) -> Option<String> {
     let (port, span) = loopback(url)?;
     let local = map.get(&port)?;
-    Some(format!(
-        "{}127.0.0.1:{local}{}",
-        &url[..span.start],
-        &url[span.end..]
-    ))
+    Some(format!("{}127.0.0.1:{local}{}", &url[..span.start], &url[span.end..]))
 }
 
 pub fn run() -> io::Result<()> {
@@ -370,25 +347,12 @@ mod tests {
         assert_eq!((port, &url[span]), (8080, "localhost:8080"));
         assert_eq!(loopback("http://[::1]:3128").map(|l| l.0), Some(3128));
         assert_eq!(loopback("socks5://127.0.0.2:1080").map(|l| l.0), Some(1080));
-        for none in [
-            "http://10.0.0.1:3128",
-            "http://proxy.corp:8080",
-            "http://127.0.0.1",
-            "http://127.0.0.1:0",
-            "",
-            "http://127.0.0.1:x",
-        ] {
+        for none in ["http://10.0.0.1:3128", "http://proxy.corp:8080", "http://127.0.0.1", "http://127.0.0.1:0", "", "http://127.0.0.1:x"] {
             assert_eq!(loopback(none), None, "{none}");
         }
         let map = HashMap::from([(7892, 41234)]);
-        assert_eq!(
-            relayed("http://u:p@127.0.0.1:7892/x", &map).as_deref(),
-            Some("http://u:p@127.0.0.1:41234/x")
-        );
-        assert_eq!(
-            relayed("127.0.0.1:7892", &map).as_deref(),
-            Some("127.0.0.1:41234")
-        );
+        assert_eq!(relayed("http://u:p@127.0.0.1:7892/x", &map).as_deref(), Some("http://u:p@127.0.0.1:41234/x"));
+        assert_eq!(relayed("127.0.0.1:7892", &map).as_deref(), Some("127.0.0.1:41234"));
         assert_eq!(relayed("http://127.0.0.1:9999", &map), None);
         assert_eq!(relayed("http://proxy.corp:7892", &map), None);
     }
@@ -403,16 +367,7 @@ mod tests {
         let ports = Arc::new(Mutex::new(HashMap::new()));
         let p = ports.clone();
         let o = win_out.clone();
-        std::thread::spawn(move || {
-            dial_side(
-                win,
-                &o,
-                move |t| t == allowed,
-                move |t, l| {
-                    p.lock().unwrap().insert(t, l);
-                },
-            )
-        });
+        std::thread::spawn(move || dial_side(win, &o, move |t| t == allowed, move |t, l| { p.lock().unwrap().insert(t, l); }));
         (ports, win_out)
     }
 
@@ -445,20 +400,12 @@ mod tests {
         let (ports, out) = relay(target);
         let local = listen_for(&ports, &out, target);
         assert_ne!(local, 0);
-        assert_eq!(
-            listen_for(&ports, &out, target),
-            local,
-            "asking again keeps the port"
-        );
+        assert_eq!(listen_for(&ports, &out, target), local, "asking again keeps the port");
         // Several at once, one bigger than many frames and the queue.
         let big: Vec<u8> = (0..3_000_000u32).map(|i| b'a' + (i % 26) as u8).collect();
         let handles: Vec<_> = (0..6)
             .map(|i| {
-                let body = if i == 0 {
-                    big.clone()
-                } else {
-                    format!("hello {i}").into_bytes()
-                };
+                let body = if i == 0 { big.clone() } else { format!("hello {i}").into_bytes() };
                 std::thread::spawn(move || {
                     let mut c = TcpStream::connect(("127.0.0.1", local)).unwrap();
                     let mut w = c.try_clone().unwrap();
@@ -489,10 +436,7 @@ mod tests {
         let mut c = TcpStream::connect(("127.0.0.1", local)).unwrap();
         c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut buf = [0u8; 1];
-        assert!(
-            matches!(c.read(&mut buf), Ok(0) | Err(_)),
-            "closed without reaching the port"
-        );
+        assert!(matches!(c.read(&mut buf), Ok(0) | Err(_)), "closed without reaching the port");
         other.set_nonblocking(true).unwrap();
         assert!(other.accept().is_err(), "nothing dialled the port");
     }

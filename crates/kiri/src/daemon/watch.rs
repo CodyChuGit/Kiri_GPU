@@ -35,9 +35,7 @@ const LATENCY: f64 = 0.05;
 const BATCH: usize = 512;
 
 pub fn start(engine: Weak<Engine>) {
-    let _ = std::thread::Builder::new()
-        .name("kiri-watch".into())
-        .spawn(move || run(engine));
+    let _ = std::thread::Builder::new().name("kiri-watch".into()).spawn(move || run(engine));
 }
 
 fn run(engine: Weak<Engine>) {
@@ -56,16 +54,7 @@ fn run(engine: Weak<Engine>) {
             // A source new to this stream has nothing from before now: the
             // resumed stream would replay its folder's whole history.
             let cur = current_event_id();
-            roots = now
-                .into_iter()
-                .map(|path| {
-                    roots
-                        .iter()
-                        .find(|r| r.path == path)
-                        .cloned()
-                        .unwrap_or_else(|| Root::new(path, cur))
-                })
-                .collect();
+            roots = now.into_iter().map(|path| roots.iter().find(|r| r.path == path).cloned().unwrap_or_else(|| Root::new(path, cur))).collect();
             let since = since_for(last);
             if since == SINCE_NOW {
                 known = Known::new();
@@ -73,11 +62,7 @@ fn run(engine: Weak<Engine>) {
             known.sync(&roots);
             if !roots.is_empty() {
                 let dirs = watch_dirs(&roots.iter().map(|r| r.path.clone()).collect::<Vec<_>>());
-                stream = Stream::start(&dirs, roots.clone(), tx.clone(), since, cur)
-                    .inspect_err(|err| {
-                        crate::diag::warn!("could not watch bind mounts for changes", error = err)
-                    })
-                    .ok();
+                stream = Stream::start(&dirs, roots.clone(), tx.clone(), since, cur).inspect_err(|err| crate::diag::warn!("could not watch bind mounts for changes", error = err)).ok();
             }
         }
         drop(e);
@@ -104,15 +89,7 @@ fn run(engine: Weak<Engine>) {
 fn watch_dirs(roots: &[String]) -> Vec<String> {
     let mut dirs: Vec<String> = roots
         .iter()
-        .map(|r| {
-            if std::path::Path::new(r).is_dir() {
-                r.clone()
-            } else {
-                std::path::Path::new(r)
-                    .parent()
-                    .map_or_else(|| "/".to_owned(), |p| p.display().to_string())
-            }
-        })
+        .map(|r| if std::path::Path::new(r).is_dir() { r.clone() } else { std::path::Path::new(r).parent().map_or_else(|| "/".to_owned(), |p| p.display().to_string()) })
         .collect();
     dirs.sort();
     dirs.dedup();
@@ -121,12 +98,7 @@ fn watch_dirs(roots: &[String]) -> Vec<String> {
 
 /// This batch and whatever else is already waiting, as guest lines: each
 /// path looked at once, however many times it changed.
-fn lines(
-    first: Vec<(String, u32)>,
-    rx: &Receiver<Vec<(String, u32)>>,
-    roots: &[Root],
-    known: &mut Known,
-) -> Vec<String> {
+fn lines(first: Vec<(String, u32)>, rx: &Receiver<Vec<(String, u32)>>, roots: &[Root], known: &mut Known) -> Vec<String> {
     let mut order = Vec::new();
     let mut flags: HashMap<String, u32> = HashMap::new();
     let mut rescan = Vec::new();
@@ -135,9 +107,7 @@ fn lines(
         if f & flag::LOST != 0 {
             rescan.push(path.clone());
         }
-        let Some(path) = under(&path, roots) else {
-            continue;
-        };
+        let Some(path) = under(&path, roots) else { continue };
         match flags.get_mut(&path) {
             Some(old) => *old |= f,
             None => {
@@ -185,20 +155,14 @@ struct Root {
 impl Root {
     fn new(path: String, start_id: u64) -> Root {
         let sensitive = case_sensitive(&path);
-        Root {
-            path,
-            sensitive,
-            start_id,
-        }
+        Root { path, sensitive, start_id }
     }
 }
 
 /// Whether the volume of `path` is case-sensitive; the macOS default
 /// (insensitive) when that can't be told.
 fn case_sensitive(path: &str) -> bool {
-    let Ok(c) = std::ffi::CString::new(path) else {
-        return false;
-    };
+    let Ok(c) = std::ffi::CString::new(path) else { return false };
     // SAFETY: a NUL-terminated path.
     unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) == 1 }
 }
@@ -213,11 +177,7 @@ fn current_event_id() -> u64 {
 fn spell(path: &str, root: &str, sensitive: bool) -> Option<String> {
     let head = path.get(..root.len())?;
     let rest = &path[root.len()..];
-    let same = if sensitive {
-        head == root
-    } else {
-        head.eq_ignore_ascii_case(root)
-    };
+    let same = if sensitive { head == root } else { head.eq_ignore_ascii_case(root) };
     (same && (rest.is_empty() || rest.starts_with('/'))).then(|| format!("{root}{rest}"))
 }
 
@@ -226,9 +186,7 @@ fn spell(path: &str, root: &str, sensitive: bool) -> Option<String> {
 /// and FSEvents may spell a path as it is on disk rather than as the bind
 /// source was written.
 fn root_of<'a>(path: &str, roots: &'a [Root]) -> Option<(&'a Root, String)> {
-    roots
-        .iter()
-        .find_map(|r| spell(path, &r.path, r.sensitive).map(|s| (r, s)))
+    roots.iter().find_map(|r| spell(path, &r.path, r.sensitive).map(|s| (r, s)))
 }
 
 fn under(path: &str, roots: &[Root]) -> Option<String> {
@@ -280,18 +238,7 @@ impl Meta {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::symlink_metadata(path).ok()?;
         let new = m.created().is_ok_and(|t| t >= since);
-        Some((
-            Meta {
-                dir: m.is_dir(),
-                ino: m.ino(),
-                size: m.size(),
-                mtime: (m.mtime(), m.mtime_nsec()),
-                ctime: (m.ctime(), m.ctime_nsec()),
-                mode: m.mode(),
-                owner: (m.uid(), m.gid()),
-            },
-            new,
-        ))
+        Some((Meta { dir: m.is_dir(), ino: m.ino(), size: m.size(), mtime: (m.mtime(), m.mtime_nsec()), ctime: (m.ctime(), m.ctime_nsec()), mode: m.mode(), owner: (m.uid(), m.gid()) }, new))
     }
 }
 
@@ -307,39 +254,15 @@ impl Meta {
 fn ops(was: Option<Meta>, now: Option<Meta>, new: bool, flags: u32) -> Vec<char> {
     let quiet = flags & flag::LOST != 0 && flags & flag::ITEM == 0;
     match (was, now) {
-        (None, None) => {
-            if flags & (flag::REMOVED | flag::RENAMED) != 0 {
-                vec!['D']
-            } else {
-                Vec::new()
-            }
-        }
+        (None, None) => if flags & (flag::REMOVED | flag::RENAMED) != 0 { vec!['D'] } else { Vec::new() },
         (Some(_), None) => vec!['D'],
         // A file made with content: created, then written, as in the VM.
-        (None, Some(n)) if new => {
-            if n.dir {
-                vec!['C']
-            } else {
-                vec!['C', 'M']
-            }
-        }
+        (None, Some(n)) if new => if n.dir { vec!['C'] } else { vec!['C', 'M'] },
         // Here before watching began and not seen since: the flags say what
         // happened (a folder gets nothing but its creation: children say more).
-        (None, Some(n)) if flags & (flag::CREATED | flag::RENAMED) != 0 => {
-            if n.dir {
-                vec!['C']
-            } else {
-                vec!['C', 'M']
-            }
-        }
+        (None, Some(n)) if flags & (flag::CREATED | flag::RENAMED) != 0 => if n.dir { vec!['C'] } else { vec!['C', 'M'] },
         (None, Some(_)) if quiet => Vec::new(),
-        (None, Some(n)) => {
-            if n.dir {
-                Vec::new()
-            } else {
-                vec!['M']
-            }
-        }
+        (None, Some(n)) => if n.dir { Vec::new() } else { vec!['M'] },
         // Folders: a child's change moves a folder's times, which Linux
         // doesn't report on the folder; only its own mode or owner count.
         (Some(w), Some(n)) if n.dir => {
@@ -384,25 +307,17 @@ const MAX_RESCAN: usize = 100_000;
 impl Known {
     fn new() -> Known {
         // A second back: a file made just before the stream started is new.
-        Known {
-            paths: HashMap::new(),
-            since: std::time::SystemTime::now() - Duration::from_secs(1),
-            starts: Vec::new(),
-        }
+        Known { paths: HashMap::new(), since: std::time::SystemTime::now() - Duration::from_secs(1), starts: Vec::new() }
     }
 
     /// Follows the set of sources: a source new here starts being watched
     /// now, one gone has its paths forgotten.
     fn sync(&mut self, roots: &[Root]) {
-        self.starts
-            .retain(|(p, _)| roots.iter().any(|r| r.path == *p));
+        self.starts.retain(|(p, _)| roots.iter().any(|r| r.path == *p));
         for r in roots {
             if !self.starts.iter().any(|(p, _)| *p == r.path) {
                 // A second back: a file made just before it was added is new.
-                self.starts.push((
-                    r.path.clone(),
-                    std::time::SystemTime::now() - Duration::from_secs(1),
-                ));
+                self.starts.push((r.path.clone(), std::time::SystemTime::now() - Duration::from_secs(1)));
             }
         }
         self.paths.retain(|p, _| under(p, roots).is_some());
@@ -411,10 +326,7 @@ impl Known {
     /// The time before which a file under the source of `path` isn't new.
     fn since_of(&self, path: &str) -> std::time::SystemTime {
         // `path` is spelled as its source, so an exact match is right.
-        self.starts
-            .iter()
-            .find(|(r, _)| spell(path, r, true).is_some())
-            .map_or(self.since, |(_, t)| *t)
+        self.starts.iter().find(|(r, _)| spell(path, r, true).is_some()).map_or(self.since, |(_, t)| *t)
     }
 
     /// What changed at `path` since it was last looked at, remembering now.
@@ -437,23 +349,14 @@ impl Known {
     fn rescan(&self, dir: &str, roots: &[Root]) -> Vec<String> {
         let dir = trimmed(dir);
         // Every source `dir` is, or is above ("/" is above all of them) ...
-        let mut tops: Vec<String> = roots
-            .iter()
-            .filter(|r| dir == "/" || spell(&r.path, dir, r.sensitive).is_some())
-            .map(|r| r.path.clone())
-            .collect();
+        let mut tops: Vec<String> = roots.iter().filter(|r| dir == "/" || spell(&r.path, dir, r.sensitive).is_some()).map(|r| r.path.clone()).collect();
         // ... and `dir` itself when it is inside one.
         if let Some(d) = under(dir, roots) {
             tops.push(d);
         }
         let mut out = Vec::new();
         for top in tops {
-            out.extend(
-                self.paths
-                    .keys()
-                    .filter(|p| spell(p, &top, true).is_some())
-                    .cloned(),
-            );
+            out.extend(self.paths.keys().filter(|p| spell(p, &top, true).is_some()).cloned());
             let mut stack = vec![top];
             while let Some(p) = stack.pop() {
                 if out.len() >= MAX_RESCAN {
@@ -505,20 +408,11 @@ struct FSEventStreamContext {
     copy_description: *const c_void,
 }
 
-type Callback =
-    extern "C" fn(FSEventStreamRef, *mut c_void, usize, *mut c_void, *const u32, *const u64);
+type Callback = extern "C" fn(FSEventStreamRef, *mut c_void, usize, *mut c_void, *const u32, *const u64);
 
 #[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
-    fn FSEventStreamCreate(
-        alloc: CFRef,
-        cb: Callback,
-        ctx: *const FSEventStreamContext,
-        paths: CFRef,
-        since: u64,
-        latency: f64,
-        flags: u32,
-    ) -> FSEventStreamRef;
+    fn FSEventStreamCreate(alloc: CFRef, cb: Callback, ctx: *const FSEventStreamContext, paths: CFRef, since: u64, latency: f64, flags: u32) -> FSEventStreamRef;
     fn FSEventStreamSetDispatchQueue(stream: FSEventStreamRef, queue: *mut c_void);
     fn FSEventStreamStart(stream: FSEventStreamRef) -> u8;
     fn FSEventStreamStop(stream: FSEventStreamRef);
@@ -530,19 +424,8 @@ unsafe extern "C" {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     static kCFTypeArrayCallBacks: u8;
-    fn CFStringCreateWithBytes(
-        alloc: CFRef,
-        bytes: *const u8,
-        len: isize,
-        encoding: u32,
-        external: u8,
-    ) -> CFRef;
-    fn CFArrayCreate(
-        alloc: CFRef,
-        values: *const CFRef,
-        count: isize,
-        callbacks: *const u8,
-    ) -> CFRef;
+    fn CFStringCreateWithBytes(alloc: CFRef, bytes: *const u8, len: isize, encoding: u32, external: u8) -> CFRef;
+    fn CFArrayCreate(alloc: CFRef, values: *const CFRef, count: isize, callbacks: *const u8) -> CFRef;
     fn CFRelease(cf: CFRef);
 }
 
@@ -581,24 +464,11 @@ impl Stream {
 // owns this, and FSEvents' calls are thread-safe.
 unsafe impl Send for Stream {}
 
-extern "C" fn on_events(
-    _: FSEventStreamRef,
-    info: *mut c_void,
-    n: usize,
-    paths: *mut c_void,
-    flags: *const u32,
-    ids: *const u64,
-) {
+extern "C" fn on_events(_: FSEventStreamRef, info: *mut c_void, n: usize, paths: *mut c_void, flags: *const u32, ids: *const u64) {
     // SAFETY: FSEvents passes `n` C strings and `n` flags, and `info` is the
     // Info this stream was made with, freed only by `release_info` once the
     // stream is gone.
-    let (info, paths, flags) = unsafe {
-        (
-            &*(info as *const Info),
-            std::slice::from_raw_parts(paths as *const *const c_char, n),
-            std::slice::from_raw_parts(flags, n),
-        )
-    };
+    let (info, paths, flags) = unsafe { (&*(info as *const Info), std::slice::from_raw_parts(paths as *const *const c_char, n), std::slice::from_raw_parts(flags, n)) };
     // SAFETY: as above, `n` ids.
     let ids = unsafe { std::slice::from_raw_parts(ids, n) };
     if let Some(&max) = ids.iter().max() {
@@ -608,14 +478,10 @@ extern "C" fn on_events(
     for ((p, &f), &id) in paths.iter().zip(flags).zip(ids) {
         let lost = f & flag::LOST != 0;
         if lost && !info.warned.swap(true, Ordering::Relaxed) {
-            crate::diag::info!(
-                "FSEvents dropped changes to bind mounts; looking at the files again"
-            );
+            crate::diag::info!("FSEvents dropped changes to bind mounts; looking at the files again");
         }
         // SAFETY: a NUL-terminated path from FSEvents.
-        let Ok(path) = unsafe { CStr::from_ptr(*p) }.to_str() else {
-            continue;
-        };
+        let Ok(path) = unsafe { CStr::from_ptr(*p) }.to_str() else { continue };
         if stale(path, id, f, &info.roots) {
             continue;
         }
@@ -639,63 +505,25 @@ extern "C" fn release_info(info: *const c_void) {
 fn queue() -> *mut c_void {
     static QUEUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // SAFETY: a serial queue made once and kept for the process's life.
-    *QUEUE.get_or_init(|| unsafe {
-        dispatch_queue_create(c"dev.kiri.watch".as_ptr(), std::ptr::null())
-    } as usize) as *mut c_void
+    *QUEUE.get_or_init(|| unsafe { dispatch_queue_create(c"dev.kiri.watch".as_ptr(), std::ptr::null()) } as usize) as *mut c_void
 }
 
 impl Stream {
-    fn start(
-        dirs: &[String],
-        roots: Vec<Root>,
-        tx: Sender<Vec<(String, u32)>>,
-        since: u64,
-        cur: u64,
-    ) -> std::io::Result<Stream> {
+    fn start(dirs: &[String], roots: Vec<Root>, tx: Sender<Vec<(String, u32)>>, since: u64, cur: u64) -> std::io::Result<Stream> {
         // Until an event comes, a restart resumes from where this one began.
         let last = Arc::new(AtomicU64::new(if since == SINCE_NOW { cur } else { since }));
-        let info = Box::into_raw(Box::new(Info {
-            tx,
-            roots,
-            warned: AtomicBool::new(false),
-            last: last.clone(),
-        }));
+        let info = Box::into_raw(Box::new(Info { tx, roots, warned: AtomicBool::new(false), last: last.clone() }));
         // SAFETY: CoreFoundation objects made and released here. FSEvents
         // owns `info` from FSEventStreamCreate on and frees it through
         // `release_info`; before that it is still ours.
         unsafe {
-            let strings: Vec<CFRef> = dirs
-                .iter()
-                .map(|d| {
-                    CFStringCreateWithBytes(std::ptr::null(), d.as_ptr(), d.len() as isize, UTF8, 0)
-                })
-                .filter(|s| !s.is_null())
-                .collect();
-            let array = CFArrayCreate(
-                std::ptr::null(),
-                strings.as_ptr(),
-                strings.len() as isize,
-                &raw const kCFTypeArrayCallBacks,
-            );
+            let strings: Vec<CFRef> = dirs.iter().map(|d| CFStringCreateWithBytes(std::ptr::null(), d.as_ptr(), d.len() as isize, UTF8, 0)).filter(|s| !s.is_null()).collect();
+            let array = CFArrayCreate(std::ptr::null(), strings.as_ptr(), strings.len() as isize, &raw const kCFTypeArrayCallBacks);
             for s in &strings {
                 CFRelease(*s);
             }
-            let ctx = FSEventStreamContext {
-                version: 0,
-                info: info.cast(),
-                retain: std::ptr::null(),
-                release: release_info as *const c_void,
-                copy_description: std::ptr::null(),
-            };
-            let stream = FSEventStreamCreate(
-                std::ptr::null(),
-                on_events,
-                &ctx,
-                array,
-                since,
-                LATENCY,
-                CREATE_FILE_EVENTS | CREATE_NO_DEFER,
-            );
+            let ctx = FSEventStreamContext { version: 0, info: info.cast(), retain: std::ptr::null(), release: release_info as *const c_void, copy_description: std::ptr::null() };
+            let stream = FSEventStreamCreate(std::ptr::null(), on_events, &ctx, array, since, LATENCY, CREATE_FILE_EVENTS | CREATE_NO_DEFER);
             CFRelease(array);
             if stream.is_null() {
                 drop(Box::from_raw(info));
@@ -732,89 +560,34 @@ impl Drop for Stream {
 
 #[cfg(test)]
 mod tests {
-    use super::{Known, Meta, Root, SINCE_NOW, flag, ops, since_for, stale, trimmed, under};
+    use super::{Known, Meta, Root, flag, ops, since_for, stale, trimmed, under, SINCE_NOW};
 
     fn root(path: &str, sensitive: bool, start_id: u64) -> Root {
-        Root {
-            path: path.to_owned(),
-            sensitive,
-            start_id,
-        }
+        Root { path: path.to_owned(), sensitive, start_id }
     }
 
     fn file(size: u64, mtime: i64, ctime: i64, mode: u32) -> Option<Meta> {
-        Some(Meta {
-            dir: false,
-            ino: 1,
-            size,
-            mtime: (mtime, 0),
-            ctime: (ctime, 0),
-            mode,
-            owner: (501, 20),
-        })
+        Some(Meta { dir: false, ino: 1, size, mtime: (mtime, 0), ctime: (ctime, 0), mode, owner: (501, 20) })
     }
 
     #[test]
     fn what_each_change_means() {
         // Made since watching began: created and written; a folder created.
         assert_eq!(ops(None, file(1, 1, 1, 0o644), true, 0), ['C', 'M']);
-        assert_eq!(
-            ops(
-                None,
-                Some(Meta {
-                    dir: true,
-                    ..file(0, 1, 1, 0o755).unwrap()
-                }),
-                true,
-                0
-            ),
-            ['C']
-        );
+        assert_eq!(ops(None, Some(Meta { dir: true, ..file(0, 1, 1, 0o755).unwrap() }), true, 0), ['C']);
         // Written, or replaced by a rename (a new inode).
-        assert_eq!(
-            ops(file(1, 1, 1, 0o644), file(2, 2, 2, 0o644), false, 0),
-            ['M']
-        );
-        assert_eq!(
-            ops(
-                file(1, 1, 1, 0o644),
-                Some(Meta {
-                    ino: 2,
-                    ..file(1, 1, 1, 0o644).unwrap()
-                }),
-                false,
-                0
-            ),
-            ['M']
-        );
+        assert_eq!(ops(file(1, 1, 1, 0o644), file(2, 2, 2, 0o644), false, 0), ['M']);
+        assert_eq!(ops(file(1, 1, 1, 0o644), Some(Meta { ino: 2, ..file(1, 1, 1, 0o644).unwrap() }), false, 0), ['M']);
         // chmod after a write: only the attributes, whatever FSEvents' flags say.
-        assert_eq!(
-            ops(file(2, 2, 2, 0o644), file(2, 2, 3, 0o600), false, 0),
-            ['A']
-        );
+        assert_eq!(ops(file(2, 2, 2, 0o644), file(2, 2, 3, 0o600), false, 0), ['A']);
         // Nothing changed (a stale event): nothing.
         assert!(ops(file(1, 1, 1, 0o644), file(1, 1, 1, 0o644), false, 0).is_empty());
         // Gone.
         assert_eq!(ops(file(1, 1, 1, 0o644), None, false, 0), ['D']);
         assert!(ops(None, None, false, 0).is_empty());
         // A folder's times move with its children: not reported.
-        let d = Meta {
-            dir: true,
-            ..file(0, 1, 1, 0o755).unwrap()
-        };
-        assert!(
-            ops(
-                Some(d),
-                Some(Meta {
-                    mtime: (9, 0),
-                    ctime: (9, 0),
-                    ..d
-                }),
-                false,
-                0
-            )
-            .is_empty()
-        );
+        let d = Meta { dir: true, ..file(0, 1, 1, 0o755).unwrap() };
+        assert!(ops(Some(d), Some(Meta { mtime: (9, 0), ctime: (9, 0), ..d }), false, 0).is_empty());
         // Here before watching began, first seen now.
         assert_eq!(ops(None, file(1, 1, 1, 0o644), false, 0), ['M']);
     }
@@ -838,14 +611,8 @@ mod tests {
         assert!(k.rescan(&roots[0].path, &roots).contains(&f));
         // From "/", or a path with a trailing slash, too.
         assert!(k.rescan("/", &roots).contains(&f));
-        assert!(
-            k.rescan(&format!("{}/", roots[0].path), &roots)
-                .contains(&f)
-        );
-        assert!(
-            k.rescan(&format!("{}//", roots[0].path), &roots)
-                .contains(&f)
-        );
+        assert!(k.rescan(&format!("{}/", roots[0].path), &roots).contains(&f));
+        assert!(k.rescan(&format!("{}//", roots[0].path), &roots).contains(&f));
         assert_eq!(trimmed("///"), "/");
         assert_eq!(trimmed("/a/b//"), "/a/b");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -854,10 +621,7 @@ mod tests {
     #[test]
     fn unknown_paths_by_flags() {
         let was_here = file(1, 1, 1, 0o644);
-        let d = Some(Meta {
-            dir: true,
-            ..file(0, 1, 1, 0o755).unwrap()
-        });
+        let d = Some(Meta { dir: true, ..file(0, 1, 1, 0o755).unwrap() });
         // Gone and never looked at: removed or renamed says deleted.
         assert_eq!(ops(None, None, false, flag::REMOVED), ['D']);
         assert_eq!(ops(None, None, false, flag::RENAMED), ['D']);
@@ -875,11 +639,7 @@ mod tests {
     fn deleting_and_renaming_what_was_never_looked_at() {
         let dir = std::env::temp_dir().join(format!("kiri-watch-del-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        let (a, b, c) = (
-            dir.join("a").display().to_string(),
-            dir.join("b").display().to_string(),
-            dir.join("sub/c").display().to_string(),
-        );
+        let (a, b, c) = (dir.join("a").display().to_string(), dir.join("b").display().to_string(), dir.join("sub/c").display().to_string());
         std::fs::write(&a, "x").unwrap();
         std::fs::write(&c, "x").unwrap();
         let mut k = Known::new();
@@ -890,10 +650,7 @@ mod tests {
         // rm -rf: the file and then the folder, both reported removed.
         std::fs::remove_dir_all(dir.join("sub")).unwrap();
         assert_eq!(k.check(&c, flag::REMOVED), ['D']);
-        assert_eq!(
-            k.check(&dir.join("sub").display().to_string(), flag::REMOVED),
-            ['D']
-        );
+        assert_eq!(k.check(&dir.join("sub").display().to_string(), flag::REMOVED), ['D']);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -901,10 +658,7 @@ mod tests {
     fn a_rescan_stays_silent_about_files_it_never_saw() {
         let dir = std::env::temp_dir().join(format!("kiri-watch-rescan-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (old, young) = (
-            dir.join("old").display().to_string(),
-            dir.join("young").display().to_string(),
-        );
+        let (old, young) = (dir.join("old").display().to_string(), dir.join("young").display().to_string());
         std::fs::write(&old, "x").unwrap();
         let mut k = Known::new();
         k.since += std::time::Duration::from_secs(3600);
@@ -927,22 +681,10 @@ mod tests {
 
     #[test]
     fn only_inside_bind_sources() {
-        let roots = [
-            root("/Users/a/app", false, 0),
-            root("/Users/a/.env", false, 0),
-        ];
-        assert_eq!(
-            under("/Users/a/app/src/main.js", &roots).as_deref(),
-            Some("/Users/a/app/src/main.js")
-        );
-        assert_eq!(
-            under("/Users/a/.env", &roots).as_deref(),
-            Some("/Users/a/.env")
-        );
-        assert_eq!(
-            under("/users/A/App/src/main.js", &roots).as_deref(),
-            Some("/Users/a/app/src/main.js")
-        );
+        let roots = [root("/Users/a/app", false, 0), root("/Users/a/.env", false, 0)];
+        assert_eq!(under("/Users/a/app/src/main.js", &roots).as_deref(), Some("/Users/a/app/src/main.js"));
+        assert_eq!(under("/Users/a/.env", &roots).as_deref(), Some("/Users/a/.env"));
+        assert_eq!(under("/users/A/App/src/main.js", &roots).as_deref(), Some("/Users/a/app/src/main.js"));
         assert_eq!(under("/Users/a/application/x", &roots), None);
         assert_eq!(under("/Users/a/.envrc", &roots), None);
     }
@@ -950,17 +692,11 @@ mod tests {
     #[test]
     fn case_is_kept_on_case_sensitive_volumes() {
         let roots = [root("/Volumes/cs/app", true, 0)];
-        assert_eq!(
-            under("/Volumes/cs/app/x", &roots).as_deref(),
-            Some("/Volumes/cs/app/x")
-        );
+        assert_eq!(under("/Volumes/cs/app/x", &roots).as_deref(), Some("/Volumes/cs/app/x"));
         assert_eq!(under("/Volumes/cs/App/x", &roots), None);
         assert_eq!(under("/volumes/cs/app", &roots), None);
         let roots = [root("/Volumes/cs/app", false, 0)];
-        assert_eq!(
-            under("/Volumes/cs/App/x", &roots).as_deref(),
-            Some("/Volumes/cs/app/x")
-        );
+        assert_eq!(under("/Volumes/cs/App/x", &roots).as_deref(), Some("/Volumes/cs/app/x"));
     }
 
     #[test]
@@ -996,19 +732,13 @@ mod tests {
         let (old_root, new_root) = (dir.join("old"), dir.join("new"));
         std::fs::create_dir_all(&old_root).unwrap();
         std::fs::create_dir_all(&new_root).unwrap();
-        let (fo, fnw) = (
-            old_root.join("f").display().to_string(),
-            new_root.join("f").display().to_string(),
-        );
+        let (fo, fnw) = (old_root.join("f").display().to_string(), new_root.join("f").display().to_string());
         std::fs::write(&fo, "x").unwrap();
         std::fs::write(&fnw, "x").unwrap();
         let mut k = Known::new();
         k.sync(&[root(&old_root.display().to_string(), false, 0)]);
         // The second source is added an hour from now, by the clock of its start.
-        k.sync(&[
-            root(&old_root.display().to_string(), false, 0),
-            root(&new_root.display().to_string(), false, 9),
-        ]);
+        k.sync(&[root(&old_root.display().to_string(), false, 0), root(&new_root.display().to_string(), false, 9)]);
         for (_, t) in k.starts.iter_mut().filter(|(p, _)| p.ends_with("new")) {
             *t += std::time::Duration::from_secs(3600);
         }

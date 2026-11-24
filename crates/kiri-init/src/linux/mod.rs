@@ -2,8 +2,8 @@ mod agent;
 mod cdi;
 mod cgroup;
 mod container;
-mod copy;
 mod devices;
+mod copy;
 mod dns;
 mod fsnotify;
 mod fsview;
@@ -18,8 +18,8 @@ mod roots;
 mod seccomp;
 mod sys;
 mod transport;
-mod usage;
 mod usb;
+mod usage;
 mod volmount;
 
 use std::fs::File;
@@ -75,14 +75,8 @@ fn serve(paths: &container::Paths, init_start_ns: u64) -> io::Result<()> {
     let mut conn = dial_host()?;
     let (mem_total_kib, mem_available_kib) = meminfo();
     let mut out = Vec::with_capacity(256);
-    Msg::Hello(Hello {
-        protocol: PROTOCOL,
-        init_start_ns,
-        ready_ns: boottime_ns(),
-        mem_total_kib,
-        mem_available_kib,
-    })
-    .encode(&mut out);
+    Msg::Hello(Hello { protocol: PROTOCOL, init_start_ns, ready_ns: boottime_ns(), mem_total_kib, mem_available_kib })
+        .encode(&mut out);
     conn.write_all(&out)?;
     agent::serve(conn, paths)
 }
@@ -95,17 +89,7 @@ fn leave_initramfs() -> io::Result<()> {
     mount(c"root", c"/root", c"tmpfs", 0, Some(c"mode=0755"))?;
     // /lib/modules for containers that bind it (kind does); the kernel has
     // no modules, so it stays empty.
-    for d in [
-        c"/root/dev",
-        c"/root/proc",
-        c"/root/sys",
-        c"/root/run",
-        c"/root/tmp",
-        c"/root/etc",
-        c"/root/var",
-        c"/root/lib",
-        c"/root/lib/modules",
-    ] {
+    for d in [c"/root/dev", c"/root/proc", c"/root/sys", c"/root/run", c"/root/tmp", c"/root/etc", c"/root/var", c"/root/lib", c"/root/lib/modules"] {
         sys::mkdir(d, 0o755);
     }
     // Free the initramfs copy of this binary; the running image stays mapped.
@@ -113,16 +97,7 @@ fn leave_initramfs() -> io::Result<()> {
     // SAFETY: plain path syscalls with valid NUL-terminated strings.
     unsafe {
         check(libc::chdir(c"/root".as_ptr()) as _, "chdir /root")?;
-        check(
-            libc::mount(
-                c".".as_ptr(),
-                c"/".as_ptr(),
-                std::ptr::null(),
-                libc::MS_MOVE,
-                std::ptr::null(),
-            ) as _,
-            "move root",
-        )?;
+        check(libc::mount(c".".as_ptr(), c"/".as_ptr(), std::ptr::null(), libc::MS_MOVE, std::ptr::null()) as _, "move root")?;
         check(libc::chroot(c".".as_ptr()) as _, "chroot")?;
         check(libc::chdir(c"/".as_ptr()) as _, "chdir /")?;
     }
@@ -139,48 +114,12 @@ fn mount_kernel_filesystems() -> io::Result<()> {
     };
     m(c"proc", c"/proc", c"proc", nosuid_nodev_noexec, None)?;
     m(c"sysfs", c"/sys", c"sysfs", nosuid_nodev_noexec, None)?;
-    m(
-        c"devtmpfs",
-        c"/dev",
-        c"devtmpfs",
-        libc::MS_NOSUID,
-        Some(c"mode=0755"),
-    )?;
-    m(
-        c"devpts",
-        c"/dev/pts",
-        c"devpts",
-        libc::MS_NOSUID | libc::MS_NOEXEC,
-        Some(c"ptmxmode=0666,mode=0620"),
-    )?;
-    m(
-        c"shm",
-        c"/dev/shm",
-        c"tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        Some(c"mode=1777"),
-    )?;
-    m(
-        c"cgroup2",
-        c"/sys/fs/cgroup",
-        c"cgroup2",
-        nosuid_nodev_noexec,
-        Some(c"nsdelegate,memory_recursiveprot"),
-    )?;
-    m(
-        c"run",
-        c"/run",
-        c"tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        Some(c"mode=0755"),
-    )?;
-    m(
-        c"tmp",
-        c"/tmp",
-        c"tmpfs",
-        libc::MS_NOSUID | libc::MS_NODEV,
-        Some(c"mode=1777"),
-    )?;
+    m(c"devtmpfs", c"/dev", c"devtmpfs", libc::MS_NOSUID, Some(c"mode=0755"))?;
+    m(c"devpts", c"/dev/pts", c"devpts", libc::MS_NOSUID | libc::MS_NOEXEC, Some(c"ptmxmode=0666,mode=0620"))?;
+    m(c"shm", c"/dev/shm", c"tmpfs", libc::MS_NOSUID | libc::MS_NODEV, Some(c"mode=1777"))?;
+    m(c"cgroup2", c"/sys/fs/cgroup", c"cgroup2", nosuid_nodev_noexec, Some(c"nsdelegate,memory_recursiveprot"))?;
+    m(c"run", c"/run", c"tmpfs", libc::MS_NOSUID | libc::MS_NODEV, Some(c"mode=0755"))?;
+    m(c"tmp", c"/tmp", c"tmpfs", libc::MS_NOSUID | libc::MS_NODEV, Some(c"mode=1777"))?;
     Ok(())
 }
 
@@ -208,11 +147,7 @@ fn host_dirs() -> io::Result<container::Paths> {
     mkdir(&root, 0o710)?;
     mkdir(&root.join("volumes"), 0o700)?;
     take_over(&root)?;
-    let paths = container::Paths {
-        layers: root.join("layers"),
-        containers: root.join("containers"),
-        cgroup: host_cgroup()?,
-    };
+    let paths = container::Paths { layers: root.join("layers"), containers: root.join("containers"), cgroup: host_cgroup()? };
     mkdir(&paths.layers, 0o700)?;
     mkdir(&paths.containers, 0o700)?;
     // What an agent that died uncleanly left running: under the cgroup it
@@ -243,13 +178,7 @@ fn take_over(root: &std::path::Path) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     let path = root.join("agent.lock");
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(&path)?;
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(&path)?;
     let locked = |f: &File| {
         // SAFETY: flock on a descriptor we own.
         unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
@@ -269,19 +198,14 @@ fn take_over(root: &std::path::Path) -> io::Result<()> {
             // SAFETY: signalling the process that holds our data directory's lock.
             unsafe { libc::kill(old, libc::SIGTERM) };
             signalled = Some(waited);
-        } else if orphan
-            && signalled.is_some_and(|t| waited - t > std::time::Duration::from_secs(5))
-        {
+        } else if orphan && signalled.is_some_and(|t| waited - t > std::time::Duration::from_secs(5)) {
             // SAFETY: as above; it did not stop on SIGTERM.
             unsafe { libc::kill(old, libc::SIGKILL) };
         }
         if waited > std::time::Duration::from_secs(8) {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
-                format!(
-                    "another Kiri engine is running on this machine (agent {old}, daemon {}): stop it first",
-                    daemon.unwrap_or(0)
-                ),
+                format!("another Kiri engine is running on this machine (agent {old}, daemon {}): stop it first", daemon.unwrap_or(0)),
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -300,20 +224,13 @@ fn parent_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     }
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // pid (comm) state ppid …; comm may hold spaces and parentheses.
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Whether a process is a `kiri daemon` (by its arguments: the binary may
 /// have any name). PID 1 or a subreaper adopting an orphan is not.
 fn is_daemon(pid: libc::pid_t) -> bool {
-    pid > 1
-        && std::fs::read(format!("/proc/{pid}/cmdline"))
-            .is_ok_and(|c| c.split(|b| *b == 0).any(|a| a == b"daemon"))
+    pid > 1 && std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c.split(|b| *b == 0).any(|a| a == b"daemon"))
 }
 
 /// The cgroup containers go under on a Linux host, chosen as dockerd and
@@ -336,13 +253,7 @@ fn is_daemon(pid: libc::pid_t) -> bool {
 /// when its agent restarts), it is not nested again.
 fn host_cgroup() -> io::Result<PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup")?;
-    let rel = own
-        .lines()
-        .find_map(|l| l.strip_prefix("0::"))
-        .unwrap_or("/")
-        .trim()
-        .trim_start_matches('/')
-        .to_owned();
+    let rel = own.lines().find_map(|l| l.strip_prefix("0::")).unwrap_or("/").trim().trim_start_matches('/').to_owned();
     let root = PathBuf::from("/sys/fs/cgroup");
     if !root.join("cgroup.controllers").exists() {
         mount_cgroup2(&root)?;
@@ -353,11 +264,7 @@ fn host_cgroup() -> io::Result<PathBuf> {
         base.pop();
     }
     let procs = |dir: &std::path::Path| -> Vec<String> {
-        std::fs::read_to_string(dir.join("cgroup.procs"))
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+        std::fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default().lines().map(str::to_owned).collect()
     };
     // Moves processes to the leaf beside the containers' cgroup.
     let to_leaf = |pids: Vec<String>| {
@@ -424,10 +331,7 @@ fn delegated(own: &std::path::Path, pids: &[String]) -> bool {
     if own.extension().is_some_and(|e| e == "service") {
         return true;
     }
-    let (me, parent) = (
-        std::process::id().to_string(),
-        std::os::unix::process::parent_id().to_string(),
-    );
+    let (me, parent) = (std::process::id().to_string(), std::os::unix::process::parent_id().to_string());
     pids.iter().all(|p| *p == me || *p == parent)
 }
 
@@ -438,33 +342,15 @@ fn data_dirs() -> io::Result<container::Paths> {
     sys::mkdir(c"/var/lib/kiri", 0o755);
     // noinit_itable: the disk is made with lazy inode tables; zeroing them in
     // the background would only write gigabytes of zeros to the host.
-    let disk = mount(
-        c"/dev/vda",
-        c"/var/lib/kiri",
-        c"ext4",
-        libc::MS_NOATIME,
-        Some(c"noinit_itable"),
-    );
+    let disk = mount(c"/dev/vda", c"/var/lib/kiri", c"ext4", libc::MS_NOATIME, Some(c"noinit_itable"));
     if let Err(e) = disk {
         eprintln!("kiri-init: no data disk ({e}); keeping images in memory");
-        mount(
-            c"kiri",
-            c"/var/lib/kiri",
-            c"tmpfs",
-            libc::MS_NOATIME,
-            Some(c"mode=0755"),
-        )?;
+        mount(c"kiri", c"/var/lib/kiri", c"tmpfs", libc::MS_NOATIME, Some(c"mode=0755"))?;
     }
     // The Mac's filesystem over virtiofs, for bind mounts.
     sys::mkdir(c"/mnt", 0o755);
     sys::mkdir(c"/mnt/mac", 0o755);
-    if let Err(e) = mount(
-        c"kiri-mac",
-        c"/mnt/mac",
-        c"virtiofs",
-        libc::MS_NOATIME,
-        None,
-    ) {
+    if let Err(e) = mount(c"kiri-mac", c"/mnt/mac", c"virtiofs", libc::MS_NOATIME, None) {
         eprintln!("kiri-init: no Mac file share ({e}); bind mounts of Mac paths will fail");
     }
     // An x86-64 guest (Intel Macs, WSL2) runs amd64 binaries natively.
@@ -484,14 +370,8 @@ fn data_dirs() -> io::Result<container::Paths> {
     let _ = std::fs::create_dir(&paths.cgroup);
     // cpu, memory and pids for limits; cpuset and io so containers that
     // run their own containers (Kubernetes, Docker in Docker) find them.
-    sys::write_file(
-        "/sys/fs/cgroup/cgroup.subtree_control",
-        "+cpu +memory +pids",
-    )?;
-    sys::write_file(
-        "/sys/fs/cgroup/kiri/cgroup.subtree_control",
-        "+cpu +memory +pids",
-    )?;
+    sys::write_file("/sys/fs/cgroup/cgroup.subtree_control", "+cpu +memory +pids")?;
+    sys::write_file("/sys/fs/cgroup/kiri/cgroup.subtree_control", "+cpu +memory +pids")?;
     for c in ["+cpuset", "+io"] {
         let _ = sys::write_file("/sys/fs/cgroup/cgroup.subtree_control", c);
         let _ = sys::write_file("/sys/fs/cgroup/kiri/cgroup.subtree_control", c);
@@ -507,24 +387,10 @@ fn data_dirs() -> io::Result<container::Paths> {
 #[cfg(target_arch = "aarch64")]
 fn rosetta() {
     sys::mkdir(c"/run/rosetta", 0o755);
-    if mount(
-        c"rosetta",
-        c"/run/rosetta",
-        c"virtiofs",
-        libc::MS_RDONLY,
-        None,
-    )
-    .is_err()
-    {
+    if mount(c"rosetta", c"/run/rosetta", c"virtiofs", libc::MS_RDONLY, None).is_err() {
         return;
     }
-    if let Err(e) = mount(
-        c"binfmt_misc",
-        c"/proc/sys/fs/binfmt_misc",
-        c"binfmt_misc",
-        0,
-        None,
-    ) {
+    if let Err(e) = mount(c"binfmt_misc", c"/proc/sys/fs/binfmt_misc", c"binfmt_misc", 0, None) {
         eprintln!("kiri-init: no binfmt_misc ({e}); amd64 images will not run");
         return;
     }
@@ -561,9 +427,7 @@ fn dial_host() -> io::Result<File> {
 /// MemTotal and MemAvailable in KiB.
 fn meminfo() -> (u64, u64) {
     let mut buf = [0u8; 2048];
-    let Ok(n) = File::open("/proc/meminfo").and_then(|mut f| f.read(&mut buf)) else {
-        return (0, 0);
-    };
+    let Ok(n) = File::open("/proc/meminfo").and_then(|mut f| f.read(&mut buf)) else { return (0, 0) };
     let s = std::str::from_utf8(&buf[..n]).unwrap_or_default();
     let field = |name: &str| {
         s.lines()

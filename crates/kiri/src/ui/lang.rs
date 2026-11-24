@@ -66,10 +66,7 @@ pub const FILES: [(&str, &str); 37] = [
 fn keys() -> &'static [&'static str] {
     static KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
     KEYS.get_or_init(|| {
-        let set: std::collections::BTreeSet<&'static str> = maps()
-            .values()
-            .flat_map(|m| m.keys().map(String::as_str))
-            .collect();
+        let set: std::collections::BTreeSet<&'static str> = maps().values().flat_map(|m| m.keys().map(String::as_str)).collect();
         set.into_iter().collect()
     })
 }
@@ -77,15 +74,7 @@ fn keys() -> &'static [&'static str] {
 /// `tag`'s words in the keys' order, a missing word `null`.
 fn words(tag: &str) -> Option<serde_json::Value> {
     let m = maps().get(tag)?;
-    Some(
-        keys()
-            .iter()
-            .map(|k| {
-                m.get(*k)
-                    .map_or(serde_json::Value::Null, |w| w.as_str().into())
-            })
-            .collect(),
-    )
+    Some(keys().iter().map(|k| m.get(*k).map_or(serde_json::Value::Null, |w| w.as_str().into())).collect())
 }
 
 /// The words a page opens with, as one JS object literal: `{"en": [every
@@ -94,10 +83,7 @@ fn words(tag: &str) -> Option<serde_json::Value> {
 /// once, so a language added later ([`words_js`]) costs only its words.
 pub fn strings_js(lang: &str) -> String {
     let mut out = serde_json::Map::new();
-    out.insert(
-        "en".into(),
-        keys().iter().map(|k| serde_json::Value::from(*k)).collect(),
-    );
+    out.insert("en".into(), keys().iter().map(|k| serde_json::Value::from(*k)).collect());
     if let Some(w) = words(lang) {
         out.insert(lang.into(), w);
     }
@@ -109,21 +95,13 @@ pub fn strings_js(lang: &str) -> String {
 /// language picked. `None` for a tag Kiri has no file for.
 pub fn words_js(tag: &str) -> Option<String> {
     let w = words(tag)?;
-    Some(format!(
-        "window.kiriWords && kiriWords({})",
-        serde_json::json!({ tag: w })
-    ))
+    Some(format!("window.kiriWords && kiriWords({})", serde_json::json!({ tag: w })))
 }
 
 /// Each file parsed, English to its words, by language tag.
 fn maps() -> &'static HashMap<&'static str, HashMap<String, String>> {
     static MAPS: OnceLock<HashMap<&'static str, HashMap<String, String>>> = OnceLock::new();
-    MAPS.get_or_init(|| {
-        FILES
-            .iter()
-            .map(|(tag, json)| (*tag, serde_json::from_str(json).unwrap_or_default()))
-            .collect()
-    })
+    MAPS.get_or_init(|| FILES.iter().map(|(tag, json)| (*tag, serde_json::from_str(json).unwrap_or_default())).collect())
 }
 
 /// A language tag to one Kiri has, as the pages' `langFor` does: Chinese
@@ -137,11 +115,7 @@ fn lang_for(tag: &str) -> Option<&'static str> {
     let is = |id: &str| t == id || t.starts_with(&format!("{id}-"));
     if is("zh") {
         let hant = t.starts_with("zh-hant") || ["zh-tw", "zh-hk", "zh-mo"].iter().any(|r| is(r));
-        return Some(if hant && !t.starts_with("zh-hans") {
-            "zh-Hant"
-        } else {
-            "zh-Hans"
-        });
+        return Some(if hant && !t.starts_with("zh-hans") { "zh-Hant" } else { "zh-Hans" });
     }
     if is("pt") {
         return Some("pt-BR");
@@ -158,20 +132,14 @@ fn lang_for(tag: &str) -> Option<&'static str> {
     if is("en") {
         return Some("en");
     }
-    FILES
-        .iter()
-        .map(|(id, _)| *id)
-        .find(|id| is(&id.to_ascii_lowercase()))
+    FILES.iter().map(|(id, _)| *id).find(|id| is(&id.to_ascii_lowercase()))
 }
 
 /// The language the window shows for the `lang` setting.
 pub fn resolve(pick: Option<&str>) -> &'static str {
     match pick {
         Some(p) if !p.is_empty() && p != "system" => lang_for(p).unwrap_or("en"),
-        _ => os_languages()
-            .iter()
-            .find_map(|l| lang_for(l))
-            .unwrap_or("en"),
+        _ => os_languages().iter().find_map(|l| lang_for(l)).unwrap_or("en"),
     }
 }
 
@@ -188,14 +156,8 @@ pub fn should_ask(fresh: bool, prefs: &serde_json::Value, os: &[String]) -> bool
     if fresh {
         return true;
     }
-    let picked = prefs["lang"]
-        .as_str()
-        .is_some_and(|l| !l.is_empty() && l != "system");
-    !picked
-        && os
-            .iter()
-            .find_map(|l| lang_for(l))
-            .is_some_and(|id| id != "en")
+    let picked = prefs["lang"].as_str().is_some_and(|l| !l.is_empty() && l != "system");
+    !picked && os.iter().find_map(|l| lang_for(l)).is_some_and(|id| id != "en")
 }
 
 /// Before the page's script: the system's languages and the saved pick, so
@@ -261,18 +223,11 @@ pub fn fill(s: String, vars: &[(&str, &dyn std::fmt::Display)]) -> String {
     while let Some(open) = rest.find('{') {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
-        let name = after
-            .find('}')
-            .map(|close| &after[..close])
-            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        let name = after.find('}').map(|close| &after[..close]).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
         match name.and_then(|n| vars.iter().find(|(k, _)| *k == n)) {
             Some((k, v)) => {
                 let v = v.to_string();
-                if islands
-                    && !v
-                        .chars()
-                        .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ' '))
-                {
+                if islands && !v.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | ' ')) {
                     out.push('\u{2068}');
                     out.push_str(&v);
                     out.push('\u{2069}');
@@ -301,11 +256,7 @@ pub fn os_languages() -> Vec<String> {
     // SAFETY: +[NSLocale preferredLanguages] returns an NSArray of NSString,
     // read with plain count/objectAtIndex: on any thread.
     unsafe {
-        let Some(list): Option<Retained<AnyObject>> =
-            msg_send![class!(NSLocale), preferredLanguages]
-        else {
-            return Vec::new();
-        };
+        let Some(list): Option<Retained<AnyObject>> = msg_send![class!(NSLocale), preferredLanguages] else { return Vec::new() };
         let n: usize = msg_send![&list, count];
         (0..n)
             .filter_map(|i| {
@@ -324,26 +275,14 @@ pub fn os_languages() -> Vec<String> {
     // SAFETY: the first call sizes the buffer, the second fills it; both
     // write only through the pointers given.
     unsafe {
-        if GetUserPreferredUILanguages(
-            MUI_LANGUAGE_NAME,
-            &mut count,
-            std::ptr::null_mut(),
-            &mut len,
-        ) == 0
-            || len == 0
-        {
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, std::ptr::null_mut(), &mut len) == 0 || len == 0 {
             return Vec::new();
         }
         let mut buf = vec![0u16; len as usize];
-        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, buf.as_mut_ptr(), &mut len)
-            == 0
-        {
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, buf.as_mut_ptr(), &mut len) == 0 {
             return Vec::new();
         }
-        buf.split(|&c| c == 0)
-            .filter(|s| !s.is_empty())
-            .map(String::from_utf16_lossy)
-            .collect()
+        buf.split(|&c| c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect()
     }
 }
 
@@ -367,10 +306,7 @@ fn from_env(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
     if let Some(list) = var("LANGUAGE") {
         list.split(':').for_each(&mut add);
     }
-    if let Some(one) = ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .iter()
-        .find_map(|k| var(k).filter(|v| !v.is_empty()))
-    {
+    if let Some(one) = ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|k| var(k).filter(|v| !v.is_empty())) {
         add(&one);
     }
     out
@@ -387,11 +323,7 @@ mod tests {
         assert!(should_ask(true, &none, &os(&["nl-NL"])));
         // An update on a Spanish, Brazilian or Taiwanese computer asks.
         assert!(should_ask(false, &none, &os(&["es-MX"])));
-        assert!(should_ask(
-            false,
-            &serde_json::json!({"lang": "system"}),
-            &os(&["pt-BR"])
-        ));
+        assert!(should_ask(false, &serde_json::json!({"lang": "system"}), &os(&["pt-BR"])));
         assert!(should_ask(false, &none, &os(&["zh-TW"])));
         // Dutch first, German second: German is what the window shows, so ask.
         assert!(should_ask(false, &none, &os(&["nl-NL", "de-DE"])));
@@ -402,26 +334,10 @@ mod tests {
         assert!(should_ask(false, &none, &os(&["ar-EG"])));
         assert!(!should_ask(false, &none, &os(&[])));
         // A language picked in Settings, or the step answered, is never asked again.
-        assert!(!should_ask(
-            false,
-            &serde_json::json!({"lang": "fr"}),
-            &os(&["es-ES"])
-        ));
-        assert!(!should_ask(
-            false,
-            &serde_json::json!({"lang": "en"}),
-            &os(&["es-ES"])
-        ));
-        assert!(!should_ask(
-            false,
-            &serde_json::json!({"langAsked": true}),
-            &os(&["es-ES"])
-        ));
-        assert!(!should_ask(
-            true,
-            &serde_json::json!({"langAsked": true}),
-            &os(&["en-US"])
-        ));
+        assert!(!should_ask(false, &serde_json::json!({"lang": "fr"}), &os(&["es-ES"])));
+        assert!(!should_ask(false, &serde_json::json!({"lang": "en"}), &os(&["es-ES"])));
+        assert!(!should_ask(false, &serde_json::json!({"langAsked": true}), &os(&["es-ES"])));
+        assert!(!should_ask(true, &serde_json::json!({"langAsked": true}), &os(&["en-US"])));
     }
 
     use super::*;
@@ -527,105 +443,50 @@ mod tests {
 
     #[test]
     fn locale_variables_read_like_gettext() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| {
-            move |k: &str| {
-                pairs
-                    .iter()
-                    .find(|(n, _)| *n == k)
-                    .map(|(_, v)| (*v).to_owned())
-            }
-        };
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_owned());
         assert_eq!(from_env(env(&[("LANG", "zh_CN.UTF-8")])), ["zh-CN"]);
-        assert_eq!(
-            from_env(env(&[("LANGUAGE", "fr:zh_CN"), ("LANG", "en_US.UTF-8")])),
-            ["fr", "zh-CN", "en-US"]
-        );
-        assert_eq!(
-            from_env(env(&[("LC_ALL", "C"), ("LANG", "de_DE")])),
-            Vec::<String>::new()
-        );
+        assert_eq!(from_env(env(&[("LANGUAGE", "fr:zh_CN"), ("LANG", "en_US.UTF-8")])), ["fr", "zh-CN", "en-US"]);
+        assert_eq!(from_env(env(&[("LC_ALL", "C"), ("LANG", "de_DE")])), Vec::<String>::new());
         assert_eq!(from_env(env(&[])), Vec::<String>::new());
     }
 
     #[test]
     fn files_parse_and_the_native_words_translate() {
         for (tag, json) in FILES {
-            let m: HashMap<String, String> =
-                serde_json::from_str(json).unwrap_or_else(|e| panic!("lang/{tag}.json: {e}"));
+            let m: HashMap<String, String> = serde_json::from_str(json).unwrap_or_else(|e| panic!("lang/{tag}.json: {e}"));
             assert!(!m.is_empty(), "lang/{tag}.json is empty");
         }
         assert_eq!(tr("zh-Hans", "Settings…"), "设置…");
         for (tag, _) in FILES {
-            assert_ne!(
-                tr(tag, "Settings…"),
-                "Settings…",
-                "lang/{tag}.json lacks Settings…"
-            );
+            assert_ne!(tr(tag, "Settings…"), "Settings…", "lang/{tag}.json lacks Settings…");
         }
         assert_eq!(tr("en", "Settings…"), "Settings…");
         assert_eq!(tr("zh-Hans", "no such words"), "no such words");
         // The page opens with the keys and one language; the rest come by words_js,
         // lined up with the same keys.
         let en: serde_json::Value = serde_json::from_str(&strings_js("en")).unwrap();
-        assert_eq!(
-            en.as_object().map(|o| o.len()),
-            Some(1),
-            "English sends the keys alone"
-        );
+        assert_eq!(en.as_object().map(|o| o.len()), Some(1), "English sends the keys alone");
         let keys = en["en"].as_array().unwrap();
         let at = keys.iter().position(|k| k == "Settings…").unwrap();
         for (tag, _) in FILES {
             let packed: serde_json::Value = serde_json::from_str(&strings_js(tag)).unwrap();
-            assert_eq!(
-                packed.as_object().map(|o| o.len()),
-                Some(2),
-                "{tag}: the keys and its words only"
-            );
+            assert_eq!(packed.as_object().map(|o| o.len()), Some(2), "{tag}: the keys and its words only");
             assert_eq!(&packed["en"], &en["en"]);
-            assert_eq!(
-                packed[tag].as_array().map(Vec::len),
-                Some(keys.len()),
-                "{tag}'s words line up with the keys"
-            );
+            assert_eq!(packed[tag].as_array().map(Vec::len), Some(keys.len()), "{tag}'s words line up with the keys");
             assert_eq!(packed[tag][at], tr(tag, "Settings…").as_str());
             let js = words_js(tag).unwrap();
-            let body = js
-                .strip_prefix("window.kiriWords && kiriWords(")
-                .and_then(|r| r.strip_suffix(')'))
-                .unwrap();
+            let body = js.strip_prefix("window.kiriWords && kiriWords(").and_then(|r| r.strip_suffix(')')).unwrap();
             let sent: serde_json::Value = serde_json::from_str(body).unwrap();
-            assert_eq!(
-                sent,
-                serde_json::json!({ tag: packed[tag] }),
-                "{tag}: words_js sends what strings_js would"
-            );
+            assert_eq!(sent, serde_json::json!({ tag: packed[tag] }), "{tag}: words_js sends what strings_js would");
         }
         assert_eq!(words_js("en"), None);
         assert_eq!(words_js("klingon"), None);
         assert_eq!(words_js("</script>"), None);
-        assert_eq!(
-            fill(
-                "Started {name} on {ports}".into(),
-                &[("name", &"web"), ("ports", &"8080")]
-            ),
-            "Started web on 8080"
-        );
+        assert_eq!(fill("Started {name} on {ports}".into(), &[("name", &"web"), ("ports", &"8080")]), "Started web on 8080");
         assert_eq!(fill("{n} of {n}".into(), &[("n", &2)]), "2 of 2");
-        assert_eq!(
-            fill(
-                "Couldn't stop {name}: {error}".into(),
-                &[("name", &"{error}"), ("error", &"no {such} thing")]
-            ),
-            "Couldn't stop {error}: no {such} thing"
-        );
-        assert_eq!(
-            fill("{missing} and {} and {".into(), &[("n", &1)]),
-            "{missing} and {} and {"
-        );
-        assert_eq!(
-            fill("宽 {w}，高 {h}".into(), &[("w", &"中"), ("h", &2)]),
-            "宽 中，高 2"
-        );
+        assert_eq!(fill("Couldn't stop {name}: {error}".into(), &[("name", &"{error}"), ("error", &"no {such} thing")]), "Couldn't stop {error}: no {such} thing");
+        assert_eq!(fill("{missing} and {} and {".into(), &[("n", &1)]), "{missing} and {} and {");
+        assert_eq!(fill("宽 {w}，高 {h}".into(), &[("w", &"中"), ("h", &2)]), "宽 中，高 2");
     }
 
     #[test]
@@ -643,20 +504,8 @@ mod tests {
         assert_eq!(rtl_ready("Kubernetes".into()), "Kubernetes");
         assert_eq!(tr("ar", "Settings…"), "الإعدادات…");
         // Values in an Arabic sentence are islands; bare numbers and other languages' values aren't.
-        assert_eq!(
-            fill(
-                "تم بدء {name} على {ports}".into(),
-                &[("name", &"web"), ("ports", &8080)]
-            ),
-            "تم بدء \u{2068}web\u{2069} على 8080"
-        );
-        assert_eq!(
-            fill("من {cap}".into(), &[("cap", &"5.0 GB")]),
-            "من \u{2068}5.0 GB\u{2069}"
-        );
-        assert_eq!(
-            fill("Started {name}".into(), &[("name", &"web")]),
-            "Started web"
-        );
+        assert_eq!(fill("تم بدء {name} على {ports}".into(), &[("name", &"web"), ("ports", &8080)]), "تم بدء \u{2068}web\u{2069} على 8080");
+        assert_eq!(fill("من {cap}".into(), &[("cap", &"5.0 GB")]), "من \u{2068}5.0 GB\u{2069}");
+        assert_eq!(fill("Started {name}".into(), &[("name", &"web")]), "Started web");
     }
 }

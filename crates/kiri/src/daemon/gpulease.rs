@@ -55,27 +55,16 @@ pub fn check(id: &str, labels: &Value, devices: &[String]) -> Result<(), String>
     check_at(Path::new(SOCKET), Path::new(REQUIRED), id, labels, devices)
 }
 
-fn check_at(
-    socket: &Path,
-    required: &Path,
-    id: &str,
-    labels: &Value,
-    devices: &[String],
-) -> Result<(), String> {
+fn check_at(socket: &Path, required: &Path, id: &str, labels: &Value, devices: &[String]) -> Result<(), String> {
     if !socket.exists() {
         return if required.exists() {
-            Err(format!(
-                "GPU start refused: the GPU scheduler is not running ({} is missing and {} requires it)",
-                socket.display(),
-                required.display()
-            ))
+            Err(format!("GPU start refused: the GPU scheduler is not running ({} is missing and {} requires it)", socket.display(), required.display()))
         } else {
             Ok(())
         };
     }
     let request = json!({"op": "gpu-start", "id": id, "labels": labels, "devices": devices});
-    let answer = ask(socket, &request)
-        .map_err(|e| format!("GPU start refused: no answer from the GPU scheduler: {e}"))?;
+    let answer = ask(socket, &request).map_err(|e| format!("GPU start refused: no answer from the GPU scheduler: {e}"))?;
     verdict(&answer)
 }
 
@@ -101,15 +90,10 @@ fn ask(_socket: &Path, _request: &Value) -> std::io::Result<String> {
 
 /// The scheduler's answer as a start's outcome; anything unclear is a no.
 fn verdict(answer: &str) -> Result<(), String> {
-    let v: Value = serde_json::from_str(answer.trim()).map_err(|_| {
-        "GPU start refused: the GPU scheduler's answer was not understood".to_owned()
-    })?;
+    let v: Value = serde_json::from_str(answer.trim()).map_err(|_| "GPU start refused: the GPU scheduler's answer was not understood".to_owned())?;
     match v["ok"].as_bool() {
         Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "GPU start refused by the GPU scheduler: {}",
-            v["reason"].as_str().unwrap_or("no reason given")
-        )),
+        Some(false) => Err(format!("GPU start refused by the GPU scheduler: {}", v["reason"].as_str().unwrap_or("no reason given"))),
         None => Err("GPU start refused: the GPU scheduler's answer was not understood".to_owned()),
     }
 }
@@ -120,31 +104,15 @@ mod tests {
 
     #[test]
     fn only_nvidia_gpus_count() {
-        let w = [
-            Want::Gpus(-1),
-            Want::Gpus(2),
-            Want::Named("nvidia.com/gpu=1".into()),
-            Want::Named("vendor.com/fpga=0".into()),
-        ];
-        assert_eq!(
-            gpus(&w),
-            [
-                "nvidia.com/gpu=all",
-                "nvidia.com/gpu=count:2",
-                "nvidia.com/gpu=1"
-            ]
-        );
+        let w = [Want::Gpus(-1), Want::Gpus(2), Want::Named("nvidia.com/gpu=1".into()), Want::Named("vendor.com/fpga=0".into())];
+        assert_eq!(gpus(&w), ["nvidia.com/gpu=all", "nvidia.com/gpu=count:2", "nvidia.com/gpu=1"]);
         assert!(gpus(&[Want::Named("vendor.com/fpga=0".into())]).is_empty());
     }
 
     #[test]
     fn verdicts() {
         assert!(verdict("{\"ok\":true}\n").is_ok());
-        assert!(
-            verdict("{\"ok\":false,\"reason\":\"maya holds the GPUs\"}")
-                .unwrap_err()
-                .contains("maya holds the GPUs")
-        );
+        assert!(verdict("{\"ok\":false,\"reason\":\"maya holds the GPUs\"}").unwrap_err().contains("maya holds the GPUs"));
         assert!(verdict("").is_err());
         assert!(verdict("yes").is_err());
         assert!(verdict("{\"ok\":\"true\"}").is_err());
@@ -159,11 +127,7 @@ mod tests {
         let dev = ["nvidia.com/gpu=all".to_owned()];
         assert!(check_at(&sock, &req, "abc", &json!({}), &dev).is_ok());
         std::fs::write(&req, "").unwrap();
-        assert!(
-            check_at(&sock, &req, "abc", &json!({}), &dev)
-                .unwrap_err()
-                .contains("not running")
-        );
+        assert!(check_at(&sock, &req, "abc", &json!({}), &dev).unwrap_err().contains("not running"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -176,10 +140,7 @@ mod tests {
         let sock = dir.join("lease.sock");
         let listener = UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
-            for answer in [
-                "{\"ok\":true}\n",
-                "{\"ok\":false,\"reason\":\"held by desktop\"}\n",
-            ] {
+            for answer in ["{\"ok\":true}\n", "{\"ok\":false,\"reason\":\"held by desktop\"}\n"] {
                 let (s, _) = listener.accept().unwrap();
                 let mut line = String::new();
                 BufReader::new(&s).read_line(&mut line).unwrap();
@@ -191,21 +152,8 @@ mod tests {
         });
         let dev = ["nvidia.com/gpu=all".to_owned()];
         let none = dir.join("absent");
-        assert!(
-            check_at(
-                &sock,
-                &none,
-                "abc",
-                &json!({"dev.kiri.sched.runtime": "maya"}),
-                &dev
-            )
-            .is_ok()
-        );
-        assert!(
-            check_at(&sock, &none, "abc", &json!({}), &dev)
-                .unwrap_err()
-                .contains("held by desktop")
-        );
+        assert!(check_at(&sock, &none, "abc", &json!({"dev.kiri.sched.runtime": "maya"}), &dev).is_ok());
+        assert!(check_at(&sock, &none, "abc", &json!({}), &dev).unwrap_err().contains("held by desktop"));
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }

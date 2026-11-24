@@ -46,12 +46,7 @@ pub struct Rule {
 }
 
 const fn char_dev(major: u32, minor: Option<u32>) -> Rule {
-    Rule {
-        kind: 2,
-        major: Some(major),
-        minor,
-        access: MKNOD | READ | WRITE,
-    }
+    Rule { kind: 2, major: Some(major), minor, access: MKNOD | READ | WRITE }
 }
 
 /// runc's default allow list, device by device: making any node; null,
@@ -60,12 +55,7 @@ const fn char_dev(major: u32, minor: Option<u32>) -> Rule {
 /// denied. (/dev/mem and /dev/port are also kept out by the dropped
 /// CAP_SYS_RAWIO.)
 const DEFAULT_RULES: [Rule; 11] = [
-    Rule {
-        kind: 0,
-        major: None,
-        minor: None,
-        access: MKNOD,
-    },
+    Rule { kind: 0, major: None, minor: None, access: MKNOD },
     char_dev(136, None),
     char_dev(1, Some(3)),
     char_dev(1, Some(5)),
@@ -88,12 +78,7 @@ fn program(extra: &[Rule]) -> Vec<u64> {
     // Opcodes: LDX_W 0x61, MOV64_X 0xbf, AND32 0x54, RSH32 0x74, JEQ_K 0x15,
     // JNE_K 0x55, MOV64_K 0xb7, EXIT 0x95.
     let rules: Vec<&Rule> = DEFAULT_RULES.iter().chain(extra).collect();
-    let len = |r: &Rule| {
-        usize::from(r.kind != 0)
-            + usize::from(r.major.is_some())
-            + usize::from(r.minor.is_some())
-            + 3
-    };
+    let len = |r: &Rule| usize::from(r.kind != 0) + usize::from(r.major.is_some()) + usize::from(r.minor.is_some()) + 3;
     let total = 6 + rules.iter().map(|r| len(r)).sum::<usize>() + 4;
     let allow = total - 2;
     let mut p = Vec::with_capacity(total);
@@ -133,13 +118,7 @@ fn program(extra: &[Rule]) -> Vec<u64> {
 
 /// `devrule` lines' fields (`c`, `10`, `229`, `rwm`) as a rule.
 pub fn parse_rule(kind: &str, major: &str, minor: &str, perms: &str) -> Option<Rule> {
-    let number = |n: &str| {
-        if n == "*" {
-            Some(None)
-        } else {
-            n.parse().ok().map(Some)
-        }
-    };
+    let number = |n: &str| if n == "*" { Some(None) } else { n.parse().ok().map(Some) };
     let kind = match kind {
         "a" => 0,
         "b" => 1,
@@ -147,17 +126,8 @@ pub fn parse_rule(kind: &str, major: &str, minor: &str, perms: &str) -> Option<R
         _ => return None,
     };
     // `a` is every device, whatever numbers come with it.
-    let (major, minor) = if kind == 0 {
-        (None, None)
-    } else {
-        (number(major)?, number(minor)?)
-    };
-    Some(Rule {
-        kind,
-        major,
-        minor,
-        access: access_bits(perms)?,
-    })
+    let (major, minor) = if kind == 0 { (None, None) } else { (number(major)?, number(minor)?) };
+    Some(Rule { kind, major, minor, access: access_bits(perms)? })
 }
 
 /// `rwm` as access bits.
@@ -216,14 +186,7 @@ pub fn restrict(cgroup_fd: RawFd, extra: &[Rule]) -> io::Result<()> {
     };
     // SAFETY: bpf(BPF_PROG_LOAD) reads `attr` for `size` bytes; `insns` and
     // `license` point to buffers that outlive the call.
-    let prog_fd = unsafe {
-        libc::syscall(
-            libc::SYS_bpf,
-            BPF_PROG_LOAD,
-            &attr as *const _,
-            std::mem::size_of::<ProgLoad>(),
-        )
-    };
+    let prog_fd = unsafe { libc::syscall(libc::SYS_bpf, BPF_PROG_LOAD, &attr as *const _, std::mem::size_of::<ProgLoad>()) };
     if prog_fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -239,14 +202,7 @@ pub fn restrict(cgroup_fd: RawFd, extra: &[Rule]) -> io::Result<()> {
         attach_flags: 2,
     };
     // SAFETY: bpf(BPF_PROG_ATTACH) reads `attach` for `size` bytes.
-    let r = unsafe {
-        libc::syscall(
-            libc::SYS_bpf,
-            BPF_PROG_ATTACH,
-            &attach as *const _,
-            std::mem::size_of::<ProgAttach>(),
-        )
-    };
+    let r = unsafe { libc::syscall(libc::SYS_bpf, BPF_PROG_ATTACH, &attach as *const _, std::mem::size_of::<ProgAttach>()) };
     // SAFETY: closing a fd we own; the attachment lives on in the cgroup.
     unsafe { libc::close(prog_fd) };
     if r < 0 {
@@ -266,11 +222,7 @@ mod tests {
         let mut pc = 0;
         loop {
             let i = prog[pc];
-            let (code, dst, src) = (
-                i as u8,
-                ((i >> 8) & 0xf) as usize,
-                ((i >> 12) & 0xf) as usize,
-            );
+            let (code, dst, src) = (i as u8, ((i >> 8) & 0xf) as usize, ((i >> 12) & 0xf) as usize);
             let (off, imm) = ((i >> 16) as u16 as i16, (i >> 32) as u32 as i32);
             pc += 1;
             match code {
@@ -299,10 +251,7 @@ mod tests {
         assert!(!run(&p, 1, READ, 8, 0)); // reading it
         assert!(!run(&p, 2, rw, 10, 229)); // fuse is not in the default list
         assert!(!run(&p, 2, READ | MKNOD, 1, 1)); // /dev/mem
-        let p = program(&[
-            parse_rule("c", "10", "229", "rwm").unwrap(),
-            parse_rule("b", "8", "*", "r").unwrap(),
-        ]);
+        let p = program(&[parse_rule("c", "10", "229", "rwm").unwrap(), parse_rule("b", "8", "*", "r").unwrap()]);
         assert!(run(&p, 2, rw, 10, 229));
         assert!(run(&p, 1, READ, 8, 16));
         assert!(!run(&p, 1, rw, 8, 16)); // read only

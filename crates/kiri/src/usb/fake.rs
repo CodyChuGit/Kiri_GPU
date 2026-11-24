@@ -70,14 +70,14 @@ fn config_descriptor(kind: Kind) -> Vec<u8> {
     let body: Vec<u8> = match kind {
         Kind::Serial => [
             &[9, 4, 0, 0, 1, 0x02, 0x02, 0x01, 0][..], // communications interface, ACM
-            &[5, 0x24, 0x00, 0x10, 0x01],              // CDC header
-            &[5, 0x24, 0x01, 0x00, 0x01],              // call management
-            &[4, 0x24, 0x02, 0x02],                    // ACM: line coding and serial state
-            &[5, 0x24, 0x06, 0x00, 0x01],              // union: 0 controls 1
-            &[7, 5, 0x81, 0x03, 8, 0, 16],             // notifications, interrupt IN
-            &[9, 4, 1, 0, 2, 0x0a, 0, 0, 0],           // data interface
-            &[7, 5, 0x82, 0x02, 64, 0, 0],             // bulk IN
-            &[7, 5, 0x02, 0x02, 64, 0, 0],             // bulk OUT
+            &[5, 0x24, 0x00, 0x10, 0x01],             // CDC header
+            &[5, 0x24, 0x01, 0x00, 0x01],             // call management
+            &[4, 0x24, 0x02, 0x02],                   // ACM: line coding and serial state
+            &[5, 0x24, 0x06, 0x00, 0x01],             // union: 0 controls 1
+            &[7, 5, 0x81, 0x03, 8, 0, 16],            // notifications, interrupt IN
+            &[9, 4, 1, 0, 2, 0x0a, 0, 0, 0],          // data interface
+            &[7, 5, 0x82, 0x02, 64, 0, 0],            // bulk IN
+            &[7, 5, 0x02, 0x02, 64, 0, 0],            // bulk OUT
         ]
         .concat(),
         Kind::Mouse => [
@@ -98,10 +98,8 @@ fn config_descriptor(kind: Kind) -> Vec<u8> {
 
 /// Buttons (3 bits + padding), then X, Y and wheel as signed bytes.
 const REPORT: [u8; 52] = [
-    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
-    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x03,
-    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03,
-    0x81, 0x06, 0xc0, 0xc0,
+    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95,
+    0x01, 0x75, 0x05, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06, 0xc0, 0xc0,
 ];
 
 fn string_descriptor(index: u8, kind: Kind) -> Option<Vec<u8>> {
@@ -141,12 +139,7 @@ impl Fake {
     }
 
     fn unplug(&self) {
-        if let Some(s) = self
-            .session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
+        if let Some(s) = self.session.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             let _ = s.shutdown(Shutdown::Both);
         }
     }
@@ -160,9 +153,7 @@ impl Backend for Fake {
             (0x80, 6) => match desc_type {
                 1 => Done::read(device_descriptor(kind)),
                 2 => Done::read(config_descriptor(kind)),
-                3 => {
-                    string_descriptor(desc_index, kind).map_or(Done::fail(usbip::EPIPE), Done::read)
-                }
+                3 => string_descriptor(desc_index, kind).map_or(Done::fail(usbip::EPIPE), Done::read),
                 _ => Done::fail(usbip::EPIPE),
             },
             (0x81, 6) if kind == Kind::Mouse && desc_type == 0x22 => Done::read(REPORT.to_vec()),
@@ -172,24 +163,12 @@ impl Backend for Fake {
             (0x21, 0x0a) | (0x21, 0x0b) if kind == Kind::Mouse => Done::wrote(0),
             // CDC: SET_LINE_CODING, GET_LINE_CODING, SET_CONTROL_LINE_STATE, SEND_BREAK.
             (0x21, 0x20) if kind == Kind::Serial => {
-                self.st
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .line_coding = out.to_vec();
+                self.st.lock().unwrap_or_else(|e| e.into_inner()).line_coding = out.to_vec();
                 Done::wrote(out.len())
             }
             (0xa1, 0x21) if kind == Kind::Serial => {
-                let lc = self
-                    .st
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .line_coding
-                    .clone();
-                Done::read(if lc.len() == 7 {
-                    lc
-                } else {
-                    vec![0x00, 0xc2, 0x01, 0x00, 0, 0, 8]
-                })
+                let lc = self.st.lock().unwrap_or_else(|e| e.into_inner()).line_coding.clone();
+                Done::read(if lc.len() == 7 { lc } else { vec![0x00, 0xc2, 0x01, 0x00, 0, 0, 8] })
             }
             (0x21, 0x22) | (0x21, 0x23) if kind == Kind::Serial => Done::wrote(0),
             _ => Done::fail(usbip::EPIPE),
@@ -237,10 +216,7 @@ impl Backend for Fake {
                 if stall {
                     return Done::fail(usbip::EPIPE);
                 }
-                match self.wait(seq, |st| {
-                    (!st.echo.is_empty())
-                        .then(|| st.echo.drain(..len.min(st.echo.len())).collect::<Vec<u8>>())
-                }) {
+                match self.wait(seq, |st| (!st.echo.is_empty()).then(|| st.echo.drain(..len.min(st.echo.len())).collect::<Vec<u8>>())) {
                     Ok(data) => Done::read(data),
                     Err(d) => d,
                 }
@@ -271,11 +247,7 @@ impl Backend for Fake {
     }
 
     fn abort(&self, seq: u32, _endpoint: u8) {
-        self.st
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .aborted
-            .insert(seq);
+        self.st.lock().unwrap_or_else(|e| e.into_inner()).aborted.insert(seq);
         self.cv.notify_all();
     }
 
@@ -291,27 +263,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
     let kind = match args.first().map(String::as_str) {
         Some("serial") => Kind::Serial,
         Some("mouse") => Kind::Mouse,
-        _ => {
-            return Err(io::Error::other(
-                "usage: kiri usb fake serial|mouse [--location L] [--unplug-after BYTES] [--stall-once] [--reports N]",
-            ));
-        }
+        _ => return Err(io::Error::other("usage: kiri usb fake serial|mouse [--location L] [--unplug-after BYTES] [--stall-once] [--reports N]")),
     };
-    let opt = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
+    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let location = opt("--location").unwrap_or_else(|| format!("fake-{}", std::process::id()));
-    if location.is_empty()
-        || !location
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    {
-        return Err(io::Error::other(
-            "--location takes letters, digits and dashes",
-        ));
+    if location.is_empty() || !location.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(io::Error::other("--location takes letters, digits and dashes"));
     }
     let fake = std::sync::Arc::new(Fake {
         kind,
@@ -324,25 +281,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
         unplug_after: opt("--unplug-after").and_then(|n| n.parse().ok()),
         session: Mutex::new(None),
     });
-    let name = if kind == Kind::Serial {
-        "Kiri test serial"
-    } else {
-        "Kiri test mouse"
-    };
-    let (stream, reader) = usbip::connect(
-        &crate::client::socket()?,
-        &location,
-        name,
-        FULL_SPEED,
-        0x7f << 16 | (std::process::id() & 0x7f),
-    )?;
+    let name = if kind == Kind::Serial { "Kiri test serial" } else { "Kiri test mouse" };
+    let (stream, reader) = usbip::connect(&crate::client::socket()?, &location, name, FULL_SPEED, 0x7f << 16 | (std::process::id() & 0x7f))?;
     *fake.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream.try_clone()?);
     eprintln!("kiri usb: {name} attached as {location}");
     let r = usbip::serve(fake.clone(), reader, stream);
     let st = fake.st.lock().unwrap_or_else(|e| e.into_inner());
-    eprintln!(
-        "kiri usb: {name} detached ({} bytes echoed, {} halts cleared)",
-        st.echoed, st.halts_cleared
-    );
+    eprintln!("kiri usb: {name} detached ({} bytes echoed, {} halts cleared)", st.echoed, st.halts_cleared);
     r
 }

@@ -19,11 +19,11 @@ mod fake;
 pub mod helper;
 #[cfg(target_os = "macos")]
 pub mod mac;
+#[cfg(target_os = "macos")]
+mod usbip;
 /// Where a device shows up in Linux (shared with the guest agent).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod sysfs;
-#[cfg(target_os = "macos")]
-mod usbip;
 
 const USAGE: &str = "usage: kiri usb [list] | attach DEVICE | detach DEVICE | helper remove\n\
     DEVICE is a location (0x02114000), vendor:product (1532:00d7) or part of the name";
@@ -34,15 +34,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
         (Some("attach"), Some(d)) => attach(d),
         (Some("detach"), Some(d)) => detach(d),
         #[cfg(target_os = "macos")]
-        (Some("serve"), Some(location)) => {
-            mac::serve(location, flag(args, "--fd"), flag(args, "--status"))
-        }
+        (Some("serve"), Some(location)) => mac::serve(location, flag(args, "--fd"), flag(args, "--status")),
         #[cfg(target_os = "macos")]
         (Some("helper"), Some(r)) if r == "remove" => helper::remove(),
         #[cfg(target_os = "macos")]
-        (Some("helper"), Some(label)) => {
-            helper::serve(label, args.get(2).map(String::as_str).unwrap_or(""))
-        }
+        (Some("helper"), Some(label)) => helper::serve(label, args.get(2).map(String::as_str).unwrap_or("")),
         // Software devices for the end-to-end tests (tests/usb.sh).
         #[cfg(target_os = "macos")]
         (Some("fake"), _) => fake::run(&args[1..]),
@@ -52,9 +48,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a String> {
-    args.iter()
-        .position(|a| a == name)
-        .and_then(|i| args.get(i + 1))
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1))
 }
 
 #[cfg(target_os = "macos")]
@@ -66,10 +60,7 @@ fn list() -> io::Result<()> {
         println!("No USB devices.");
         return Ok(());
     }
-    println!(
-        "{:<12} {:<10} {:<6} {:<10} {:<9} NAME",
-        "LOCATION", "ID", "SPEED", "STATE", "KIND"
-    );
+    println!("{:<12} {:<10} {:<6} {:<10} {:<9} NAME", "LOCATION", "ID", "SPEED", "STATE", "KIND");
     for d in &devices {
         let state = if attached.iter().any(|a| a == &d.location()) {
             "in Kiri"
@@ -78,30 +69,12 @@ fn list() -> io::Result<()> {
         } else {
             "on the Mac"
         };
-        let kind = match d.kind() {
-            "" => "usb",
-            k => k,
-        };
-        println!(
-            "{:<12} {:04x}:{:04x}  {:<6} {:<10} {:<9} {}",
-            d.location(),
-            d.vendor,
-            d.product,
-            d.speed_name(),
-            state,
-            kind,
-            d.name
-        );
+        let kind = match d.kind() { "" => "usb", k => k };
+        println!("{:<12} {:04x}:{:04x}  {:<6} {:<10} {:<9} {}", d.location(), d.vendor, d.product, d.speed_name(), state, kind, d.name);
     }
     // Left the bus: Kiri attaches them again when they come back.
-    for (l, name) in waiting
-        .iter()
-        .filter(|(l, _)| !devices.iter().any(|d| &d.location() == l))
-    {
-        println!(
-            "{:<12} {:<10} {:<6} {:<10} {:<9} {}",
-            l, "-", "-", "waiting", "-", name
-        );
+    for (l, name) in waiting.iter().filter(|(l, _)| !devices.iter().any(|d| &d.location() == l)) {
+        println!("{:<12} {:<10} {:<6} {:<10} {:<9} {}", l, "-", "-", "waiting", "-", name);
     }
     Ok(())
 }
@@ -128,12 +101,7 @@ fn waiting() -> Vec<(String, String)> {
         .unwrap_or_default()
         .iter()
         .filter(|s| s["Waiting"] == true)
-        .filter_map(|s| {
-            Some((
-                s["Location"].as_str()?.to_owned(),
-                s["Name"].as_str().unwrap_or_default().to_owned(),
-            ))
-        })
+        .filter_map(|s| Some((s["Location"].as_str()?.to_owned(), s["Name"].as_str().unwrap_or_default().to_owned())))
         .collect()
 }
 
@@ -145,14 +113,8 @@ fn attach(which: &str) -> io::Result<()> {
         return Ok(());
     }
     attach_device(&d)?;
-    println!(
-        "{} is in Kiri now. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).",
-        d.name
-    );
-    println!(
-        "It is gone from the Mac until `kiri usb detach {}`.",
-        d.location()
-    );
+    println!("{} is in Kiri now. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).", d.name);
+    println!("It is gone from the Mac until `kiri usb detach {}`.", d.location());
     Ok(())
 }
 
@@ -162,8 +124,7 @@ fn attach(which: &str) -> io::Result<()> {
 pub fn attach_device(d: &mac::Device) -> io::Result<()> {
     // Wake the engine first, so the attach doesn't wait on a boot.
     crate::client::request("POST", "/kiri/wake", None)?;
-    helper::attach(&d.location(), &d.name, d.linux_speed(), d.devid())
-        .map_err(|e| io::Error::other(format!("{} was not attached: {e}", d.name)))
+    helper::attach(&d.location(), &d.name, d.linux_speed(), d.devid()).map_err(|e| io::Error::other(format!("{} was not attached: {e}", d.name)))
 }
 
 /// Gives a device back to macOS.
@@ -183,11 +144,7 @@ fn detach(which: &str) -> io::Result<()> {
         // Away from the bus and waited for: `kiri usb ls` gives its location.
         Err(e) => {
             return match waiting().into_iter().find(|(l, _)| l == which) {
-                Some((l, name)) => detach_location(&l).map(|()| {
-                    println!(
-                        "Kiri stops waiting for {name}; it stays on the Mac when it comes back."
-                    )
-                }),
+                Some((l, name)) => detach_location(&l).map(|()| println!("Kiri stops waiting for {name}; it stays on the Mac when it comes back.")),
                 None => Err(e),
             };
         }
@@ -206,9 +163,7 @@ fn list() -> io::Result<()> {
     // WSL has no USB bus at all until usbipd-win attaches a device.
     let Ok(entries) = std::fs::read_dir(dir) else {
         if wsl {
-            println!(
-                "No USB devices are attached to WSL. In Windows: usbipd list, then usbipd attach --wsl --busid <BUSID>."
-            );
+            println!("No USB devices are attached to WSL. In Windows: usbipd list, then usbipd attach --wsl --busid <BUSID>.");
         } else {
             println!("No USB devices.");
         }
@@ -218,13 +173,7 @@ fn list() -> io::Result<()> {
     let devices = sysfs_devices(dir);
     println!("{:<22} {:<10} {:<14} NAME", "DEVICE", "ID", "TTY");
     for d in devices {
-        println!(
-            "{:<22} {:<10} {:<14} {}",
-            d.node,
-            d.id,
-            d.tty.as_deref().unwrap_or("-"),
-            d.name
-        );
+        println!("{:<22} {:<10} {:<14} {}", d.node, d.id, d.tty.as_deref().unwrap_or("-"), d.name);
     }
     println!("\nContainers already see these devices: docker run --device /dev/ttyUSB0 …");
     if wsl {
@@ -249,25 +198,11 @@ fn detach(_: &str) -> io::Result<()> {
 /// (number, class, subclass, protocol), then its name and vendor.
 /// "mouse", "keyboard", "network", "serial", "radio", "storage", "audio",
 /// "camera" or "" (a USB device).
-pub fn kind_of(
-    device_class: u8,
-    interfaces: &[(u8, u8, u8, u8)],
-    vendor: u16,
-    name: &str,
-) -> &'static str {
+pub fn kind_of(device_class: u8, interfaces: &[(u8, u8, u8, u8)], vendor: u16, name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
     // Radios that speak serial: named for what they are.
-    if has(&[
-        "zigbee",
-        "z-wave",
-        "zwave",
-        "thread",
-        "lora",
-        "conbee",
-        "skyconnect",
-        "sonoff",
-    ]) {
+    if has(&["zigbee", "z-wave", "zwave", "thread", "lora", "conbee", "skyconnect", "sonoff"]) {
         return "radio";
     }
     let mut ifs = interfaces.to_vec();
@@ -293,28 +228,14 @@ pub fn kind_of(
         return "storage";
     }
     // CDC: ECM/NCM/EEM networking, else a serial port (ACM).
-    if ifs.iter().any(|i| i.1 == 2 && matches!(i.2, 6 | 12 | 13))
-        || class(0xe0) && has(&["ethernet", "lan", "rndis"])
-    {
+    if ifs.iter().any(|i| i.1 == 2 && matches!(i.2, 6 | 12 | 13)) || class(0xe0) && has(&["ethernet", "lan", "rndis"]) {
         return "network";
     }
-    if has(&[
-        "ethernet",
-        " lan",
-        "lan ",
-        "gbe",
-        "network adapter",
-        "2.5g",
-        "1g",
-        "10/100",
-    ]) {
+    if has(&["ethernet", " lan", "lan ", "gbe", "network adapter", "2.5g", "1g", "10/100"]) {
         return "network";
     }
     // Serial bridges: CP210x, CH34x, FTDI, PL2303, and CDC ACM.
-    if matches!(vendor, 0x10c4 | 0x1a86 | 0x0403 | 0x067b)
-        || class(2)
-        || has(&["uart", "serial", "arduino", "esp32", "ttl"])
-    {
+    if matches!(vendor, 0x10c4 | 0x1a86 | 0x0403 | 0x067b) || class(2) || has(&["uart", "serial", "arduino", "esp32", "ttl"]) {
         return "serial";
     }
     if has(&["mouse"]) {
@@ -336,63 +257,16 @@ mod kind_tests {
     #[test]
     fn devices_get_the_right_kind() {
         // Razer Basilisk: interface 0 a boot mouse, 1 a keyboard for its macro keys.
-        assert_eq!(
-            kind_of(
-                0,
-                &[(1, 3, 1, 1), (0, 3, 1, 2), (2, 3, 0, 0)],
-                0x1532,
-                "Razer Basilisk V3 Pro 35K"
-            ),
-            "mouse"
-        );
+        assert_eq!(kind_of(0, &[(1, 3, 1, 1), (0, 3, 1, 2), (2, 3, 0, 0)], 0x1532, "Razer Basilisk V3 Pro 35K"), "mouse");
         // ROG AZOTH: a keyboard, whatever its name says.
-        assert_eq!(
-            kind_of(0, &[(0, 3, 1, 1), (1, 3, 0, 0)], 0x0b05, "ROG AZOTH"),
-            "keyboard"
-        );
-        assert_eq!(
-            kind_of(
-                0,
-                &[(0, 0xff, 0, 0)],
-                0x10c4,
-                "Sonoff Zigbee 3.0 USB Dongle Plus"
-            ),
-            "radio"
-        );
-        assert_eq!(
-            kind_of(
-                0,
-                &[(0, 0xff, 0, 0)],
-                0x10c4,
-                "CP2102 USB to UART Bridge Controller"
-            ),
-            "serial"
-        );
-        assert_eq!(
-            kind_of(2, &[(0, 2, 2, 1), (1, 10, 0, 0)], 0x2341, "Uno"),
-            "serial"
-        );
-        assert_eq!(
-            kind_of(0, &[(0, 0xff, 0xff, 0)], 0x0bda, "USB 10_100_1G_2_5G LAN"),
-            "network"
-        );
-        assert_eq!(
-            kind_of(0, &[(0, 2, 13, 0), (1, 10, 0, 1)], 0x0bda, "Adapter"),
-            "network"
-        );
-        assert_eq!(
-            kind_of(
-                0,
-                &[(0, 1, 1, 0), (1, 1, 2, 0), (2, 3, 0, 0)],
-                0x352f,
-                "DM30 USB Microphone"
-            ),
-            "audio"
-        );
-        assert_eq!(
-            kind_of(0, &[(0, 14, 1, 0), (1, 14, 2, 0)], 0x046d, "C920"),
-            "camera"
-        );
+        assert_eq!(kind_of(0, &[(0, 3, 1, 1), (1, 3, 0, 0)], 0x0b05, "ROG AZOTH"), "keyboard");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "Sonoff Zigbee 3.0 USB Dongle Plus"), "radio");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0, 0)], 0x10c4, "CP2102 USB to UART Bridge Controller"), "serial");
+        assert_eq!(kind_of(2, &[(0, 2, 2, 1), (1, 10, 0, 0)], 0x2341, "Uno"), "serial");
+        assert_eq!(kind_of(0, &[(0, 0xff, 0xff, 0)], 0x0bda, "USB 10_100_1G_2_5G LAN"), "network");
+        assert_eq!(kind_of(0, &[(0, 2, 13, 0), (1, 10, 0, 1)], 0x0bda, "Adapter"), "network");
+        assert_eq!(kind_of(0, &[(0, 1, 1, 0), (1, 1, 2, 0), (2, 3, 0, 0)], 0x352f, "DM30 USB Microphone"), "audio");
+        assert_eq!(kind_of(0, &[(0, 14, 1, 0), (1, 14, 2, 0)], 0x046d, "C920"), "camera");
         assert_eq!(kind_of(0, &[(0, 8, 6, 80)], 0x0781, "Ultra"), "storage");
         assert_eq!(kind_of(0, &[(0, 3, 0, 0)], 0x0bda, "USB2.0 HID"), "");
     }
@@ -409,10 +283,7 @@ mod kind_tests {
 /// The devices for the window's USB view.
 #[cfg(target_os = "macos")]
 pub fn ui_list() -> serde_json::Value {
-    let daemon: Vec<serde_json::Value> = crate::client::get("/kiri/usb")
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
+    let daemon: Vec<serde_json::Value> = crate::client::get("/kiri/usb").ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
     let mut rows: Vec<serde_json::Value> = Vec::new();
     let devices = match mac::devices() {
         Ok(d) => d,
@@ -454,12 +325,7 @@ fn state_of(inside: Option<&serde_json::Value>) -> &'static str {
 /// The daemon's `Nodes` as the page's `paths`: `[{path, what}]`.
 #[cfg(target_os = "macos")]
 fn paths(a: &serde_json::Value) -> Vec<serde_json::Value> {
-    a["Nodes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|n| serde_json::json!({"path": n["Path"], "what": n["What"]}))
-        .collect()
+    a["Nodes"].as_array().into_iter().flatten().map(|n| serde_json::json!({"path": n["Path"], "what": n["What"]})).collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -530,27 +396,17 @@ struct SysDevice {
 /// The USB devices under a sysfs bus directory, hubs left out.
 #[cfg(not(target_os = "macos"))]
 fn sysfs_devices(dir: &std::path::Path) -> Vec<SysDevice> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut out = Vec::new();
     for e in entries.flatten() {
         let p = e.path();
-        let read = |f: &str| {
-            std::fs::read_to_string(p.join(f))
-                .map(|s| s.trim().to_owned())
-                .unwrap_or_default()
-        };
+        let read = |f: &str| std::fs::read_to_string(p.join(f)).map(|s| s.trim().to_owned()).unwrap_or_default();
         let (vid, pid) = (read("idVendor"), read("idProduct"));
         if vid.is_empty() || read("bDeviceClass") == "09" {
             continue;
         }
         let maker = read("manufacturer");
-        let name = [maker.clone(), read("product")]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let name = [maker.clone(), read("product")].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
         let speed = match read("speed").as_str() {
             "1.5" => "low",
             "12" => "full",
@@ -563,45 +419,24 @@ fn sysfs_devices(dir: &std::path::Path) -> Vec<SysDevice> {
         let mut ifs = Vec::new();
         for i in std::fs::read_dir(&p).into_iter().flatten().flatten() {
             let ip = i.path();
-            let r = |f: &str| {
-                std::fs::read_to_string(ip.join(f))
-                    .map(|s| s.trim().to_owned())
-                    .unwrap_or_default()
-            };
+            let r = |f: &str| std::fs::read_to_string(ip.join(f)).map(|s| s.trim().to_owned()).unwrap_or_default();
             if ip.join("bInterfaceClass").exists() {
-                ifs.push((
-                    hex(r("bInterfaceNumber")),
-                    hex(r("bInterfaceClass")),
-                    hex(r("bInterfaceSubClass")),
-                    hex(r("bInterfaceProtocol")),
-                ));
+                ifs.push((hex(r("bInterfaceNumber")), hex(r("bInterfaceClass")), hex(r("bInterfaceSubClass")), hex(r("bInterfaceProtocol"))));
             }
         }
-        let kind = kind_of(
-            hex(read("bDeviceClass")),
-            &ifs,
-            u16::from_str_radix(&vid, 16).unwrap_or(0),
-            &name,
-        );
+        let kind = kind_of(hex(read("bDeviceClass")), &ifs, u16::from_str_radix(&vid, 16).unwrap_or(0), &name);
         out.push(SysDevice {
             kind,
             node: format!("/dev/bus/usb/{:0>3}/{:0>3}", read("busnum"), read("devnum")),
             id: format!("{vid}:{pid}"),
-            name: if name.is_empty() {
-                "USB device".into()
-            } else {
-                name
-            },
+            name: if name.is_empty() { "USB device".into() } else { name },
             speed: speed.into(),
             tty: tty_of(&p),
             serial: read("serial"),
             bus: read("busnum").parse().unwrap_or(0),
             dev: read("devnum").parse().unwrap_or(0),
             busid: e.file_name().to_string_lossy().into_owned(),
-            paths: sysfs::nodes(&p)
-                .into_iter()
-                .map(|n| serde_json::json!({"path": n.path, "what": n.what}))
-                .collect(),
+            paths: sysfs::nodes(&p).into_iter().map(|n| serde_json::json!({"path": n.path, "what": n.what})).collect(),
             maker,
         });
     }
@@ -615,16 +450,8 @@ fn tty_of(dev: &std::path::Path) -> Option<String> {
     for iface in std::fs::read_dir(dev).ok()?.flatten() {
         let ip = iface.path();
         // cdc-acm: <iface>/tty/ttyACM0; usb-serial: <iface>/ttyUSB0.
-        let tty_dir = std::fs::read_dir(ip.join("tty"))
-            .ok()
-            .and_then(|mut d| d.next())
-            .and_then(|e| e.ok())
-            .map(|e| e.file_name());
-        let direct = std::fs::read_dir(&ip).ok().and_then(|d| {
-            d.flatten()
-                .map(|e| e.file_name())
-                .find(|n| n.to_string_lossy().starts_with("ttyUSB"))
-        });
+        let tty_dir = std::fs::read_dir(ip.join("tty")).ok().and_then(|mut d| d.next()).and_then(|e| e.ok()).map(|e| e.file_name());
+        let direct = std::fs::read_dir(&ip).ok().and_then(|d| d.flatten().map(|e| e.file_name()).find(|n| n.to_string_lossy().starts_with("ttyUSB")));
         if let Some(n) = tty_dir.or(direct) {
             return Some(format!("/dev/{}", n.to_string_lossy()));
         }
@@ -648,29 +475,8 @@ mod tests {
             }
             p
         };
-        dev(
-            "usb1",
-            &[
-                ("idVendor", "1d6b"),
-                ("idProduct", "0002"),
-                ("bDeviceClass", "09"),
-                ("busnum", "1"),
-                ("devnum", "1"),
-            ],
-        );
-        let s = dev(
-            "1-1",
-            &[
-                ("idVendor", "10c4"),
-                ("idProduct", "ea60"),
-                ("bDeviceClass", "00"),
-                ("busnum", "1"),
-                ("devnum", "3"),
-                ("product", "CP2102"),
-                ("speed", "12"),
-                ("serial", "0001"),
-            ],
-        );
+        dev("usb1", &[("idVendor", "1d6b"), ("idProduct", "0002"), ("bDeviceClass", "09"), ("busnum", "1"), ("devnum", "1")]);
+        let s = dev("1-1", &[("idVendor", "10c4"), ("idProduct", "ea60"), ("bDeviceClass", "00"), ("busnum", "1"), ("devnum", "3"), ("product", "CP2102"), ("speed", "12"), ("serial", "0001")]);
         std::fs::create_dir_all(s.join("1-1:1.0/ttyUSB0")).unwrap();
         dev("1-1:1.0", &[]);
         let got = sysfs_devices(&d);
@@ -679,16 +485,9 @@ mod tests {
         assert_eq!(got[0].id, "10c4:ea60");
         assert_eq!(got[0].speed, "full");
         assert_eq!(got[0].tty.as_deref(), Some("/dev/ttyUSB0"));
-        assert_eq!(
-            (got[0].bus, got[0].dev, got[0].serial.as_str()),
-            (1, 3, "0001")
-        );
+        assert_eq!((got[0].bus, got[0].dev, got[0].serial.as_str()), (1, 3, "0001"));
         assert_eq!(got[0].busid, "1-1");
-        let paths: Vec<&str> = got[0]
-            .paths
-            .iter()
-            .filter_map(|p| p["path"].as_str())
-            .collect();
+        let paths: Vec<&str> = got[0].paths.iter().filter_map(|p| p["path"].as_str()).collect();
         assert_eq!(paths, ["/dev/ttyUSB0", "/dev/bus/usb/001/003"]);
         let _ = std::fs::remove_dir_all(&d);
     }

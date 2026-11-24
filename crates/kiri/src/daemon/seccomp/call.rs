@@ -51,11 +51,7 @@ pub struct TInst {
 /// (high half, low half) of what a condition compares with: the value, or for
 /// MASKED_EQ the second value under the mask.
 fn halves(c: &Cond) -> (u32, u32) {
-    let d = if c.op == Op::MaskedEq {
-        c.datum & c.value
-    } else {
-        c.value
-    };
+    let d = if c.op == Op::MaskedEq { c.datum & c.value } else { c.value };
     ((d >> 32) as u32, d as u32)
 }
 
@@ -63,18 +59,8 @@ fn halves(c: &Cond) -> (u32, u32) {
 /// opposite of what the instruction says), or a whole range condition.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
-    Cmp {
-        off: u32,
-        mask: u32,
-        code: u16,
-        datum: u32,
-        neg: bool,
-    },
-    Range {
-        index: u32,
-        op: Op,
-        value: u64,
-    },
+    Cmp { off: u32, mask: u32, code: u16, datum: u32, neg: bool },
+    Range { index: u32, op: Op, value: u64 },
 }
 
 fn steps(conds: &[Cond]) -> Vec<Step> {
@@ -83,32 +69,12 @@ fn steps(conds: &[Cond]) -> Vec<Step> {
         let base = OFF_ARGS + 8 * c.index;
         match c.op {
             Op::Eq | Op::MaskedEq => {
-                let mask = if c.op == Op::MaskedEq {
-                    c.value
-                } else {
-                    u64::MAX
-                };
+                let mask = if c.op == Op::MaskedEq { c.value } else { u64::MAX };
                 let (dh, dl) = halves(c);
-                out.push(Step::Cmp {
-                    off: base + 4,
-                    mask: (mask >> 32) as u32,
-                    code: JEQ_K,
-                    datum: dh,
-                    neg: false,
-                });
-                out.push(Step::Cmp {
-                    off: base,
-                    mask: mask as u32,
-                    code: JEQ_K,
-                    datum: dl,
-                    neg: false,
-                });
+                out.push(Step::Cmp { off: base + 4, mask: (mask >> 32) as u32, code: JEQ_K, datum: dh, neg: false });
+                out.push(Step::Cmp { off: base, mask: mask as u32, code: JEQ_K, datum: dl, neg: false });
             }
-            op => out.push(Step::Range {
-                index: c.index,
-                op,
-                value: c.value,
-            }),
+            op => out.push(Step::Range { index: c.index, op, value: c.value }),
         }
     }
     out
@@ -120,13 +86,7 @@ fn steps(conds: &[Cond]) -> Vec<Step> {
 fn leaf_steps(c: &Cond, leaf: Leaf) -> Vec<Step> {
     let (hi, lo) = (OFF_ARGS + 8 * c.index + 4, OFF_ARGS + 8 * c.index);
     let (h, l) = ((c.value >> 32) as u32, c.value as u32);
-    let cmp = |off, code, datum, neg| Step::Cmp {
-        off,
-        mask: u32::MAX,
-        code,
-        datum,
-        neg,
-    };
+    let cmp = |off, code, datum, neg| Step::Cmp { off, mask: u32::MAX, code, datum, neg };
     match (c.op, leaf) {
         (Op::Gt | Op::Ge, Leaf::Hi) => vec![cmp(hi, JGT_K, h, false)],
         (Op::Gt, Leaf::Lo) => vec![cmp(hi, JEQ_K, h, false), cmp(lo, JGT_K, l, false)],
@@ -154,27 +114,14 @@ impl Builder {
             return Tgt::End;
         }
         self.budget -= 1;
-        self.out.push(TInst {
-            off,
-            mask,
-            code,
-            datum,
-            t,
-            f,
-        });
+        self.out.push(TInst { off, mask, code, datum, t, f });
         Tgt::Inst(self.out.len() - 1)
     }
 
     /// The entry of a test that goes to `m` when the step holds, else `f`.
     fn step(&mut self, s: Step, m: Tgt, f: Tgt) -> Tgt {
         match s {
-            Step::Cmp {
-                off,
-                mask,
-                code,
-                datum,
-                neg,
-            } => {
+            Step::Cmp { off, mask, code, datum, neg } => {
                 if neg {
                     self.push(off, mask, code, datum, f, m)
                 } else {
@@ -186,26 +133,12 @@ impl Builder {
                 let (h, l) = ((value >> 32) as u32, value as u32);
                 match op {
                     Op::Gt | Op::Ge => {
-                        let t3 = self.push(
-                            lo,
-                            u32::MAX,
-                            if op == Op::Gt { JGT_K } else { JGE_K },
-                            l,
-                            m,
-                            f,
-                        );
+                        let t3 = self.push(lo, u32::MAX, if op == Op::Gt { JGT_K } else { JGE_K }, l, m, f);
                         let t2 = self.push(hi, u32::MAX, JEQ_K, h, t3, f);
                         self.push(hi, u32::MAX, JGT_K, h, m, t2)
                     }
                     Op::Lt | Op::Le => {
-                        let t3 = self.push(
-                            lo,
-                            u32::MAX,
-                            if op == Op::Lt { JGE_K } else { JGT_K },
-                            l,
-                            f,
-                            m,
-                        );
+                        let t3 = self.push(lo, u32::MAX, if op == Op::Lt { JGE_K } else { JGT_K }, l, f, m);
                         let t2 = self.push(hi, u32::MAX, JEQ_K, h, t3, m);
                         self.push(hi, u32::MAX, JGT_K, h, f, t2)
                     }
@@ -278,18 +211,10 @@ pub enum Fail {
 /// in argument order, in profile order), with every jump going forward and
 /// the first test first. `budget` is how many tests the whole filter may
 /// still hold.
-pub fn compile(
-    rules: &[(Vec<Cond>, u32)],
-    budget: &mut usize,
-    pool: &mut u64,
-) -> Result<Vec<TInst>, Fail> {
+pub fn compile(rules: &[(Vec<Cond>, u32)], budget: &mut usize, pool: &mut u64) -> Result<Vec<TInst>, Fail> {
     // A rule that comes twice stands once, as in libseccomp.
     let mut seen = HashSet::new();
-    let once: Vec<(Vec<Cond>, u32)> = rules
-        .iter()
-        .filter(|(c, a)| seen.insert((key(c), *a)))
-        .cloned()
-        .collect();
+    let once: Vec<(Vec<Cond>, u32)> = rules.iter().filter(|(c, a)| seen.insert((key(c), *a))).cloned().collect();
     let rules = &once[..];
     // Every rule that stays needs a test of its own, or is the longer of two
     // rules and is dropped: a call with more rules than tests is no loss.
@@ -322,19 +247,12 @@ pub fn compile(
     // Rules that are not in the tree as they should be get another chance
     // after it: a rule with more than one condition, whose tree can have lost
     // one way into it, and any rule whose action the tree dropped.
-    let tail: Vec<usize> = (0..rules.len())
-        .filter(|&r| {
-            rules[r].0.len() > 1 || !needed(&rules[r].0).iter().all(|l| have.contains(&(r, *l)))
-        })
-        .collect();
+    let tail: Vec<usize> = (0..rules.len()).filter(|&r| rules[r].0.len() > 1 || !needed(&rules[r].0).iter().all(|l| have.contains(&(r, *l)))).collect();
     let mut left = *budget;
     // Where the tree gets to an action of a rule that does not hold, the
     // action goes to a rule that has it and holds, or the rest of the rules
     // are read; if that is too much code, to the rule's own conditions.
-    let out = match Em::new(&db, rules, left, true)
-        .run(&tail)
-        .or_else(|_| Em::new(&db, rules, left, false).run(&tail))
-    {
+    let out = match Em::new(&db, rules, left, true).run(&tail).or_else(|_| Em::new(&db, rules, left, false).run(&tail)) {
         Ok((v, rest)) => {
             left = rest;
             Ok(v)
@@ -372,19 +290,9 @@ fn needed(conds: &[Cond]) -> &'static [Leaf] {
 /// The rules one after the other, in the order libseccomp's tree reaches
 /// their actions, then what the tree left out: the same answers as the tree
 /// where it is right, and a rule that holds in any case.
-fn slots(
-    rules: &[(Vec<Cond>, u32)],
-    mut placed: Vec<Who>,
-    have: &HashSet<Who>,
-    budget: &mut usize,
-) -> Result<Vec<TInst>, Fail> {
+fn slots(rules: &[(Vec<Cond>, u32)], mut placed: Vec<Who>, have: &HashSet<Who>, budget: &mut usize) -> Result<Vec<TInst>, Fail> {
     for (r, (conds, _)) in rules.iter().enumerate() {
-        placed.extend(
-            needed(conds)
-                .iter()
-                .map(|l| (r, *l))
-                .filter(|w| !have.contains(w)),
-        );
+        placed.extend(needed(conds).iter().map(|l| (r, *l)).filter(|w| !have.contains(w)));
     }
     let stepped: Vec<(Vec<Step>, u32)> = placed
         .into_iter()
@@ -402,19 +310,13 @@ fn slots(
         .collect();
     #[cfg(test)]
     BY_RULE.with(|c| c.set(c.get() + 1));
-    let mut b = Builder {
-        out: Vec::new(),
-        budget: *budget,
-        over: false,
-    };
+    let mut b = Builder { out: Vec::new(), budget: *budget, over: false };
     let entry = b.list(&stepped, 0, Tgt::End);
     *budget = b.budget;
     if b.over {
         return Err(Fail::TooLarge);
     }
-    let Tgt::Inst(first) = entry else {
-        return Err(Fail::TooLarge);
-    };
+    let Tgt::Inst(first) = entry else { return Err(Fail::TooLarge) };
     forward(b.out, first).map_err(|_| Fail::TooLarge)
 }
 
@@ -446,30 +348,12 @@ const MAX_DEPTH: usize = 64;
 
 impl<'a> Em<'a> {
     fn new(db: &'a Db, rules: &'a [(Vec<Cond>, u32)], budget: usize, exact: bool) -> Em<'a> {
-        Em {
-            db,
-            rules,
-            b: Builder {
-                out: Vec::new(),
-                budget,
-                over: false,
-            },
-            memo: HashMap::new(),
-            guards: HashMap::new(),
-            depth: 0,
-            raw: false,
-            exact,
-            all: None,
-            alts: HashMap::new(),
-        }
+        Em { db, rules, b: Builder { out: Vec::new(), budget, over: false }, memo: HashMap::new(), guards: HashMap::new(), depth: 0, raw: false, exact, all: None, alts: HashMap::new() }
     }
 
     /// The code and the tests left in the budget.
     fn run(mut self, tail: &[usize]) -> Result<(Vec<TInst>, usize), Unfit> {
-        let stepped: Vec<(Vec<Step>, u32)> = tail
-            .iter()
-            .map(|&r| (steps(&self.rules[r].0), self.rules[r].1))
-            .collect();
+        let stepped: Vec<(Vec<Step>, u32)> = tail.iter().map(|&r| (steps(&self.rules[r].0), self.rules[r].1)).collect();
         let after = self.b.list(&stepped, 0, Tgt::End);
         let entry = match self.db.first_level() {
             Some(head) => self.level(head, after)?,
@@ -478,9 +362,7 @@ impl<'a> Em<'a> {
         if self.b.over {
             return Err(Unfit);
         }
-        let Tgt::Inst(first) = entry else {
-            return Err(Unfit);
-        };
+        let Tgt::Inst(first) = entry else { return Err(Unfit) };
         let left = self.b.budget;
         #[cfg(test)]
         if BACK_EDGE.with(|b| b.get()) {
@@ -519,12 +401,7 @@ impl<'a> Em<'a> {
             return Ok(*t);
         }
         let t = self.db.test(i);
-        let Tgt::Inst(at) = self
-            .b
-            .push(t.off, t.mask, t.code, t.datum, Tgt::End, Tgt::End)
-        else {
-            return Err(Unfit);
-        };
+        let Tgt::Inst(at) = self.b.push(t.off, t.mask, t.code, t.datum, Tgt::End, Tgt::End) else { return Err(Unfit) };
         self.memo.insert((i, fall), Tgt::Inst(at));
         let tt = self.branch(i, true, next)?;
         let ff = self.branch(i, false, next)?;
@@ -542,19 +419,13 @@ impl<'a> Em<'a> {
         let all = match self.all {
             Some(a) => a,
             None => {
-                let stepped: Vec<(Vec<Step>, u32)> =
-                    self.rules.iter().map(|(c, a)| (steps(c), *a)).collect();
+                let stepped: Vec<(Vec<Step>, u32)> = self.rules.iter().map(|(c, a)| (steps(c), *a)).collect();
                 let a = self.b.list(&stepped, 0, Tgt::End);
                 self.all = Some(a);
                 a
             }
         };
-        let own: Vec<(Vec<Step>, u32)> = self
-            .rules
-            .iter()
-            .filter(|(_, a)| *a == action)
-            .map(|(c, a)| (steps(c), *a))
-            .collect();
+        let own: Vec<(Vec<Step>, u32)> = self.rules.iter().filter(|(_, a)| *a == action).map(|(c, a)| (steps(c), *a)).collect();
         let t = self.b.list(&own, 0, all);
         self.alts.insert(action, t);
         t
@@ -565,9 +436,7 @@ impl<'a> Em<'a> {
             Branch::Level(h) => self.level(h, next),
             Branch::Nothing => Ok(next),
             Branch::Act(a, (r, _)) => {
-                let Some((conds, action)) = self.rules.get(r) else {
-                    return Ok(next);
-                };
+                let Some((conds, action)) = self.rules.get(r) else { return Ok(next) };
                 if self.raw || conds.len() == 1 && *action == a {
                     // The nodes on the way are this rule's own.
                     return Ok(Tgt::Act(a));
@@ -628,22 +497,6 @@ fn forward(out: Vec<TInst>, first: usize) -> Result<Vec<TInst>, Unfit> {
     for (new, old) in post.iter().enumerate() {
         at[*old] = new;
     }
-    let fix = |t: Tgt| {
-        if let Tgt::Inst(j) = t {
-            Tgt::Inst(at[j])
-        } else {
-            t
-        }
-    };
-    Ok(post
-        .iter()
-        .map(|&i| TInst {
-            off: out[i].off,
-            mask: out[i].mask,
-            code: out[i].code,
-            datum: out[i].datum,
-            t: fix(out[i].t),
-            f: fix(out[i].f),
-        })
-        .collect())
+    let fix = |t: Tgt| if let Tgt::Inst(j) = t { Tgt::Inst(at[j]) } else { t };
+    Ok(post.iter().map(|&i| TInst { off: out[i].off, mask: out[i].mask, code: out[i].code, datum: out[i].datum, t: fix(out[i].t), f: fix(out[i].f) }).collect())
 }

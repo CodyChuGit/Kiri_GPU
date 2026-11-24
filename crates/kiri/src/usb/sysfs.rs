@@ -20,22 +20,11 @@ pub struct Node {
 pub fn nodes(dev: &Path) -> Vec<Node> {
     let mut out = Vec::new();
     walk(dev, "", 0, &mut out);
-    out.sort_by(|a, b| {
-        rank(a.what)
-            .cmp(&rank(b.what))
-            .then_with(|| natural(&a.path).cmp(&natural(&b.path)))
-    });
+    out.sort_by(|a, b| rank(a.what).cmp(&rank(b.what)).then_with(|| natural(&a.path).cmp(&natural(&b.path))));
     out.dedup();
-    let read = |f: &str| {
-        std::fs::read_to_string(dev.join(f))
-            .map(|s| s.trim().to_owned())
-            .unwrap_or_default()
-    };
+    let read = |f: &str| std::fs::read_to_string(dev.join(f)).map(|s| s.trim().to_owned()).unwrap_or_default();
     if let (Ok(bus), Ok(num)) = (read("busnum").parse::<u32>(), read("devnum").parse::<u32>()) {
-        out.push(Node {
-            path: format!("/dev/bus/usb/{bus:03}/{num:03}"),
-            what: "raw USB",
-        });
+        out.push(Node { path: format!("/dev/bus/usb/{bus:03}/{num:03}"), what: "raw USB" });
     }
     out
 }
@@ -43,60 +32,27 @@ pub fn nodes(dev: &Path) -> Vec<Node> {
 /// The node an entry named `name` under a directory named `parent` stands
 /// for, if it is one.
 fn node(parent: &str, name: &str) -> Option<Node> {
-    let num = |prefix: &str| {
-        name.strip_prefix(prefix)
-            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    };
+    let num = |prefix: &str| name.strip_prefix(prefix).filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
     if num("ttyUSB").is_some() || num("ttyACM").is_some() {
-        return Some(Node {
-            path: format!("/dev/{name}"),
-            what: "serial port",
-        });
+        return Some(Node { path: format!("/dev/{name}"), what: "serial port" });
     }
     if num("event").is_some() {
-        return Some(Node {
-            path: format!("/dev/input/{name}"),
-            what: "input events",
-        });
+        return Some(Node { path: format!("/dev/input/{name}"), what: "input events" });
     }
     if parent == "hidraw" && num("hidraw").is_some() {
-        return Some(Node {
-            path: format!("/dev/{name}"),
-            what: "raw HID",
-        });
+        return Some(Node { path: format!("/dev/{name}"), what: "raw HID" });
     }
     if let Some(n) = num("card").filter(|_| parent == "sound") {
-        return Some(Node {
-            path: format!("/dev/snd/controlC{n}"),
-            what: "sound card",
-        });
+        return Some(Node { path: format!("/dev/snd/controlC{n}"), what: "sound card" });
     }
     if parent == "video4linux" && num("video").is_some() {
-        return Some(Node {
-            path: format!("/dev/{name}"),
-            what: "video",
-        });
+        return Some(Node { path: format!("/dev/{name}"), what: "video" });
     }
-    if parent == "block"
-        && name.len() > 2
-        && name.starts_with("sd")
-        && name[2..].bytes().all(|b| b.is_ascii_lowercase())
-    {
-        return Some(Node {
-            path: format!("/dev/{name}"),
-            what: "disk",
-        });
+    if parent == "block" && name.len() > 2 && name.starts_with("sd") && name[2..].bytes().all(|b| b.is_ascii_lowercase()) {
+        return Some(Node { path: format!("/dev/{name}"), what: "disk" });
     }
-    if parent == "net"
-        && !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
-    {
-        return Some(Node {
-            path: name.to_owned(),
-            what: "network interface",
-        });
+    if parent == "net" && !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') {
+        return Some(Node { path: name.to_owned(), what: "network interface" });
     }
     None
 }
@@ -107,9 +63,7 @@ fn walk(dir: &Path, parent: &str, depth: u32, out: &mut Vec<Node>) {
     if depth > 7 {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
         let Ok(t) = e.file_type() else { continue };
         let name = e.file_name().to_string_lossy().into_owned();
@@ -125,13 +79,8 @@ fn walk(dir: &Path, parent: &str, depth: u32, out: &mut Vec<Node>) {
 /// `1-2` or `1-2.3`: a USB device, not one of its interfaces (`1-2:1.0`).
 fn is_usb_device(name: &str) -> bool {
     let mut p = name.splitn(2, '-');
-    let (Some(bus), Some(rest)) = (p.next(), p.next()) else {
-        return false;
-    };
-    !bus.is_empty()
-        && bus.bytes().all(|b| b.is_ascii_digit())
-        && !rest.contains(':')
-        && rest.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    let (Some(bus), Some(rest)) = (p.next(), p.next()) else { return false };
+    !bus.is_empty() && bus.bytes().all(|b| b.is_ascii_digit()) && !rest.contains(':') && rest.bytes().all(|b| b.is_ascii_digit() || b == b'.')
 }
 
 /// What a container most likely wants first.

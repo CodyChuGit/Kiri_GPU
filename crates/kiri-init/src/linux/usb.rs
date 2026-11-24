@@ -37,14 +37,7 @@ pub fn listen() -> io::Result<OwnedFd> {
 pub fn accept(listener: &OwnedFd) {
     loop {
         // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-        let fd = unsafe {
-            libc::accept4(
-                listener.as_raw_fd(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC) };
         if fd < 0 {
             return;
         }
@@ -75,11 +68,8 @@ fn attach(sock: OwnedFd) -> io::Result<()> {
     stream.set_read_timeout(None)?;
     // Answer before attaching: once attached, the kernel owns the stream.
     stream.write_all(&(port as i32).to_le_bytes())?;
-    fs::write(
-        format!("{VHCI}/attach"),
-        format!("{port} {} {devid} {speed}", stream.as_raw_fd()),
-    )
-    .map_err(|e| io::Error::new(e.kind(), format!("vhci attach on port {port}: {e}")))?;
+    fs::write(format!("{VHCI}/attach"), format!("{port} {} {devid} {speed}", stream.as_raw_fd()))
+        .map_err(|e| io::Error::new(e.kind(), format!("vhci attach on port {port}: {e}")))?;
     // The kernel holds its own reference to the socket now.
     Ok(())
 }
@@ -87,8 +77,7 @@ fn attach(sock: OwnedFd) -> io::Result<()> {
 /// The first free vhci port of the right kind: SuperSpeed devices need an
 /// `ss` port, everything else an `hs` one.
 fn free_port(speed: u32) -> io::Result<u32> {
-    let status = fs::read_to_string(format!("{VHCI}/status"))
-        .map_err(|e| io::Error::new(e.kind(), format!("no USB/IP support in this kernel ({e})")))?;
+    let status = fs::read_to_string(format!("{VHCI}/status")).map_err(|e| io::Error::new(e.kind(), format!("no USB/IP support in this kernel ({e})")))?;
     let hub = if speed == SPEED_SUPER { "ss" } else { "hs" };
     pick(&status, hub).ok_or_else(|| io::Error::from_raw_os_error(libc::EBUSY))
 }
@@ -101,9 +90,7 @@ pub fn nodes() -> Vec<String> {
         .into_iter()
         .flat_map(|(port, busid)| {
             let dev = std::path::Path::new("/sys/bus/usb/devices").join(&busid);
-            sysfs::nodes(&dev)
-                .into_iter()
-                .map(move |n| format!("{port}\t{}\t{}", n.path, n.what))
+            sysfs::nodes(&dev).into_iter().map(move |n| format!("{port}\t{}\t{}", n.path, n.what))
         })
         .collect()
 }
@@ -117,11 +104,7 @@ fn attached(status: &str) -> Vec<(u32, String)> {
         .filter_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
             let (port, busid) = (f.get(1)?.parse().ok()?, *f.get(6)?);
-            (busid != "0-0"
-                && busid
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || c == b'-' || c == b'.'))
-            .then(|| (port, busid.to_owned()))
+            (busid != "0-0" && busid.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.')).then(|| (port, busid.to_owned()))
         })
         .collect()
 }

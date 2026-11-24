@@ -50,12 +50,7 @@ impl Found {
 pub fn open_root(root: &Path) -> io::Result<OwnedFd> {
     let c = super::sys::cstr(root)?;
     // SAFETY: valid NUL-terminated path; the descriptor is owned right away.
-    let fd = unsafe {
-        libc::open(
-            c.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        )
-    };
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -140,20 +135,13 @@ fn with_path(e: io::Error, path: &Path) -> io::Error {
 }
 
 fn name_c(name: &OsStr) -> io::Result<CString> {
-    CString::new(name.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
+    CString::new(name.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
 fn open_nofollow(dir: BorrowedFd<'_>, name: &OsStr) -> io::Result<OwnedFd> {
     let c = name_c(name)?;
     // SAFETY: valid directory fd and NUL-terminated name; owned right away.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c.as_ptr(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -171,16 +159,7 @@ fn make(dir: BorrowedFd<'_>, name: &OsStr, kind: Last) -> io::Result<()> {
             Last::Exists => return Err(io::Error::from_raw_os_error(libc::ENOENT)),
             Last::Dir => libc::mkdirat(d, c.as_ptr(), 0o755),
             Last::File => {
-                let fd = libc::openat(
-                    d,
-                    c.as_ptr(),
-                    libc::O_WRONLY
-                        | libc::O_CREAT
-                        | libc::O_EXCL
-                        | libc::O_NOFOLLOW
-                        | libc::O_CLOEXEC,
-                    0o644,
-                );
+                let fd = libc::openat(d, c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644);
                 if fd >= 0 {
                     libc::close(fd);
                 }
@@ -214,14 +193,7 @@ fn fstat(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
 fn readlink(fd: BorrowedFd<'_>) -> io::Result<OsString> {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
     // SAFETY: an empty name reads the link `fd` itself; `buf` is writable.
-    let n = unsafe {
-        libc::readlinkat(
-            fd.as_raw_fd(),
-            c"".as_ptr(),
-            buf.as_mut_ptr().cast(),
-            buf.len(),
-        )
-    };
+    let n = unsafe { libc::readlinkat(fd.as_raw_fd(), c"".as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -260,11 +232,7 @@ mod tests {
     }
 
     fn rel(root: &Path, f: &Found) -> std::path::PathBuf {
-        real_path(f.fd.as_fd())
-            .unwrap()
-            .strip_prefix(root.canonicalize().unwrap())
-            .unwrap()
-            .to_owned()
+        real_path(f.fd.as_fd()).unwrap().strip_prefix(root.canonicalize().unwrap()).unwrap().to_owned()
     }
 
     #[test]
@@ -275,15 +243,8 @@ mod tests {
         let f = open(r.as_fd(), Path::new("/data"), Last::Dir).unwrap();
         // Made inside the root at the link's path, not the outside one.
         assert!(f.created);
-        assert!(
-            root.join(outside.strip_prefix("/").unwrap())
-                .join("secret")
-                .is_dir()
-        );
-        assert_eq!(
-            rel(&root, &f),
-            outside.strip_prefix("/").unwrap().join("secret")
-        );
+        assert!(root.join(outside.strip_prefix("/").unwrap()).join("secret").is_dir());
+        assert_eq!(rel(&root, &f), outside.strip_prefix("/").unwrap().join("secret"));
         assert_eq!(fs::read_dir(outside.join("secret")).unwrap().count(), 1);
     }
 
@@ -325,10 +286,7 @@ mod tests {
         let r = open_root(&root).unwrap();
         let e = open(r.as_fd(), Path::new("/a/x"), Last::Dir).err().unwrap();
         assert_eq!(e.raw_os_error(), None); // wrapped with the path
-        assert!(
-            e.to_string().contains(&format!("os error {}", libc::ELOOP)),
-            "{e}"
-        );
+        assert!(e.to_string().contains(&format!("os error {}", libc::ELOOP)), "{e}");
     }
 
     #[test]
@@ -342,9 +300,6 @@ mod tests {
 
     #[test]
     fn components_drop_root_and_dots() {
-        assert_eq!(
-            components_of(Path::new("/a/./b/../c/")),
-            ["a", "b", "..", "c"].map(OsString::from)
-        );
+        assert_eq!(components_of(Path::new("/a/./b/../c/")), ["a", "b", "..", "c"].map(OsString::from));
     }
 }

@@ -59,11 +59,7 @@ impl Ip6 {
     /// The network's subnet, as the masquerade rule matches it.
     fn subnet(&self) -> [u8; 16] {
         let bits = u128::from_be_bytes(self.gateway);
-        let mask = if self.prefix == 0 {
-            0
-        } else {
-            u128::MAX << (128 - self.prefix as u32)
-        };
+        let mask = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix as u32) };
         (bits & mask).to_be_bytes()
     }
 }
@@ -80,10 +76,7 @@ pub struct Plug {
 impl Plug {
     pub fn from_opts(opts: kiri_proto::StrList<'_>) -> Plug {
         use kiri_proto::net_opts as k;
-        Plug {
-            internal: k::values(opts, k::INTERNAL).next().is_some(),
-            no_ipv4: k::values(opts, k::NO_IPV4).next().is_some(),
-        }
+        Plug { internal: k::values(opts, k::INTERNAL).next().is_some(), no_ipv4: k::values(opts, k::NO_IPV4).next().is_some() }
     }
 }
 
@@ -132,12 +125,7 @@ pub fn host_uplink() -> io::Result<()> {
     // let containers reach the real machine's 127.0.0.1 services. host.docker
     // .internal maps to the bridge gateway instead (write_etc_files).
     let _ = HOST_UPLINK_INDEX.set(index);
-    install_nat(Nat {
-        uplink: index,
-        redirect: false,
-        dnat: Vec::new(),
-        gateway: [0; 4],
-    })
+    install_nat(Nat { uplink: index, redirect: false, dnat: Vec::new(), gateway: [0; 4] })
 }
 
 /// What Kiri's IPv4 table was last built from, so it can be rebuilt when a
@@ -158,31 +146,15 @@ static NO_FIB4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// keeps `nat` for `refresh_nat`.
 fn install_nat(nat: Nat) -> io::Result<()> {
     use std::sync::atomic::Ordering;
-    let bridges = MADE_BRIDGES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let bridges = MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let any_addr = nat.dnat.iter().any(|d| d.host_ip == [0; 4]);
-    let install = |local: Option<&[[u8; 4]]>| {
-        netlink::install_nat_from(
-            nat.uplink,
-            HOST_ADDR,
-            HOST_RELAY_PORT,
-            nat.redirect,
-            &nat.dnat,
-            nat.gateway,
-            &bridges,
-            local,
-        )
-    };
+    let install = |local: Option<&[[u8; 4]]>| netlink::install_nat_from(nat.uplink, HOST_ADDR, HOST_RELAY_PORT, nat.redirect, &nat.dnat, nat.gateway, &bridges, local);
     let r = if any_addr && NO_FIB4.load(Ordering::Relaxed) {
         install(Some(&local_addrs()))
     } else {
         match install(None) {
             Err(e) if any_addr && e.raw_os_error() == Some(libc::ENOENT) => {
-                eprintln!(
-                    "kiri-init: no nft_fib_ipv4 in this kernel; ports published on every address match this machine's addresses one by one"
-                );
+                eprintln!("kiri-init: no nft_fib_ipv4 in this kernel; ports published on every address match this machine's addresses one by one");
                 NO_FIB4.store(true, Ordering::Relaxed);
                 install(Some(&local_addrs()))
             }
@@ -200,12 +172,7 @@ fn refresh_nat() -> io::Result<()> {
     let nat = NAT.lock().unwrap_or_else(|e| e.into_inner()).take();
     match nat {
         Some(n) => {
-            let keep = Nat {
-                uplink: n.uplink,
-                redirect: n.redirect,
-                dnat: n.dnat.clone(),
-                gateway: n.gateway,
-            };
+            let keep = Nat { uplink: n.uplink, redirect: n.redirect, dnat: n.dnat.clone(), gateway: n.gateway };
             let r = install_nat(n);
             if r.is_err() {
                 *NAT.lock().unwrap_or_else(|e| e.into_inner()) = Some(keep);
@@ -242,16 +209,9 @@ fn local_addrs() -> Vec<[u8; 4]> {
     while !p.is_null() {
         // SAFETY: `p` is an entry of the list getifaddrs returned.
         let ifa = unsafe { &*p };
-        if !ifa.ifa_addr.is_null()
-            && i32::from(unsafe { (*ifa.ifa_addr).sa_family }) == libc::AF_INET
-        {
+        if !ifa.ifa_addr.is_null() && i32::from(unsafe { (*ifa.ifa_addr).sa_family }) == libc::AF_INET {
             // SAFETY: an AF_INET address is a sockaddr_in.
-            let a = unsafe {
-                (*(ifa.ifa_addr as *const libc::sockaddr_in))
-                    .sin_addr
-                    .s_addr
-            }
-            .to_ne_bytes();
+            let a = unsafe { (*(ifa.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr }.to_ne_bytes();
             if a[0] != 127 && !out.contains(&a) {
                 out.push(a);
             }
@@ -269,23 +229,14 @@ static HOST_UPLINK_INDEX: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
 /// Linux host: makes these, and only these, the published ports the kernel
 /// forwards (see `netlink::Dnat`).
 pub fn publish(dnat: &[netlink::Dnat]) -> io::Result<()> {
-    let index = *HOST_UPLINK_INDEX
-        .get()
-        .ok_or_else(|| io::Error::other("no uplink"))?;
-    install_nat(Nat {
-        uplink: index,
-        redirect: false,
-        dnat: dnat.to_vec(),
-        gateway: [0; 4],
-    })
+    let index = *HOST_UPLINK_INDEX.get().ok_or_else(|| io::Error::other("no uplink"))?;
+    install_nat(Nat { uplink: index, redirect: false, dnat: dnat.to_vec(), gateway: [0; 4] })
 }
 
 /// Brings the uplink up and returns a DHCP client for it, or None if the VM
 /// has no network card.
 pub fn uplink() -> io::Result<Option<Dhcp>> {
-    let Ok(index) = netlink::index_of(UPLINK) else {
-        return Ok(None);
-    };
+    let Ok(index) = netlink::index_of(UPLINK) else { return Ok(None) };
     let mut nl = Netlink::open(libc::NETLINK_ROUTE)?;
     netlink::set_up(&mut nl, index)?;
     sys::write_file("/proc/sys/net/ipv4/ip_forward", "1")?;
@@ -293,12 +244,7 @@ pub fn uplink() -> io::Result<Option<Dhcp>> {
     // device (tunl0, gre0, sit0, ip6tnl0...) to every container's network:
     // they stay in the VM's own, as on a machine that loads them as modules.
     let _ = sys::write_file("/proc/sys/net/core/fb_tunnels_only_for_init_net", "1");
-    install_nat(Nat {
-        uplink: index,
-        redirect: true,
-        dnat: Vec::new(),
-        gateway: [0; 4],
-    })?;
+    install_nat(Nat { uplink: index, redirect: true, dnat: Vec::new(), gateway: [0; 4] })?;
     let _ = VM_UPLINK_INDEX.set(index);
     Ok(Some(Dhcp::start(index)?))
 }
@@ -311,15 +257,8 @@ static VM_UPLINK_INDEX: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
 /// NAT network). The table is rebuilt whole, so the host.docker.internal
 /// redirect stays.
 pub fn publish_vm(dnat: &[netlink::Dnat], gateway: [u8; 4]) -> io::Result<()> {
-    let index = *VM_UPLINK_INDEX
-        .get()
-        .ok_or_else(|| io::Error::other("no uplink"))?;
-    install_nat(Nat {
-        uplink: index,
-        redirect: true,
-        dnat: dnat.to_vec(),
-        gateway,
-    })
+    let index = *VM_UPLINK_INDEX.get().ok_or_else(|| io::Error::other("no uplink"))?;
+    install_nat(Nat { uplink: index, redirect: true, dnat: dnat.to_vec(), gateway })
 }
 
 enum DhcpState {
@@ -345,44 +284,20 @@ impl Dhcp {
     fn start(index: i32) -> io::Result<Dhcp> {
         // SAFETY: plain socket setup; the fd is owned immediately.
         let sock = unsafe {
-            let fd = sys::check(
-                libc::socket(
-                    libc::AF_INET,
-                    libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                    0,
-                ) as _,
-                "dhcp socket",
-            )?;
+            let fd = sys::check(libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "dhcp socket")?;
             OwnedFd::from_raw_fd(fd as i32)
         };
         let one: libc::c_int = 1;
         let set = |opt, val: &[u8]| {
             // SAFETY: setsockopt with a buffer of the stated length.
-            unsafe {
-                libc::setsockopt(
-                    sock.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    opt,
-                    val.as_ptr().cast(),
-                    val.len() as u32,
-                )
-            }
+            unsafe { libc::setsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, opt, val.as_ptr().cast(), val.len() as u32) }
         };
         set(libc::SO_BROADCAST, &one.to_ne_bytes());
         set(libc::SO_REUSEADDR, &one.to_ne_bytes());
         set(libc::SO_BINDTODEVICE, b"eth0\0");
         let addr = sockaddr([0, 0, 0, 0], 68);
         // SAFETY: binding to a valid sockaddr_in.
-        sys::check(
-            unsafe {
-                libc::bind(
-                    sock.as_raw_fd(),
-                    (&addr as *const libc::sockaddr_in).cast(),
-                    std::mem::size_of::<libc::sockaddr_in>() as u32,
-                )
-            } as _,
-            "dhcp bind",
-        )?;
+        sys::check(unsafe { libc::bind(sock.as_raw_fd(), (&addr as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) } as _, "dhcp bind")?;
         let mut d = Dhcp {
             mac: mac_of(UPLINK)?,
             sock,
@@ -406,10 +321,7 @@ impl Dhcp {
         if matches!(self.state, DhcpState::Bound) {
             return -1;
         }
-        self.next_send
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(i32::MAX as u128) as i32
+        self.next_send.saturating_duration_since(Instant::now()).as_millis().min(i32::MAX as u128) as i32
     }
 
     pub fn on_timer(&mut self) -> io::Result<()> {
@@ -442,19 +354,9 @@ impl Dhcp {
         p.resize(300, 0);
         let to = sockaddr([255, 255, 255, 255], 67);
         // SAFETY: sending a buffer we own to a valid sockaddr_in.
-        unsafe {
-            libc::sendto(
-                self.sock.as_raw_fd(),
-                p.as_ptr().cast(),
-                p.len(),
-                0,
-                (&to as *const libc::sockaddr_in).cast(),
-                std::mem::size_of::<libc::sockaddr_in>() as u32,
-            )
-        };
+        unsafe { libc::sendto(self.sock.as_raw_fd(), p.as_ptr().cast(), p.len(), 0, (&to as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) };
         self.attempt += 1;
-        self.next_send =
-            Instant::now() + Duration::from_millis((250u64 << self.attempt.min(5)).min(4000));
+        self.next_send = Instant::now() + Duration::from_millis((250u64 << self.attempt.min(5)).min(4000));
         Ok(())
     }
 
@@ -463,22 +365,16 @@ impl Dhcp {
         let mut buf = [0u8; 1500];
         loop {
             // SAFETY: receiving into a buffer we own.
-            let n =
-                unsafe { libc::recv(self.sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+            let n = unsafe { libc::recv(self.sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
             if n <= 0 {
                 return Ok(false);
             }
             let p = &buf[..n as usize];
-            if p.len() < 240
-                || p[0] != 2
-                || p[4..8] != self.xid.to_be_bytes()
-                || p[236..240] != [99, 130, 83, 99]
-            {
+            if p.len() < 240 || p[0] != 2 || p[4..8] != self.xid.to_be_bytes() || p[236..240] != [99, 130, 83, 99] {
                 continue;
             }
             let yiaddr: [u8; 4] = p[16..20].try_into().expect("4");
-            let (mut kind, mut mask, mut router, mut server, mut dns) =
-                (0u8, [255, 255, 255, 0], [0u8; 4], [0u8; 4], Vec::new());
+            let (mut kind, mut mask, mut router, mut server, mut dns) = (0u8, [255, 255, 255, 0], [0u8; 4], [0u8; 4], Vec::new());
             let mut i = 240;
             while i + 1 < p.len() && p[i] != 255 {
                 if p[i] == 0 {
@@ -486,40 +382,25 @@ impl Dhcp {
                     continue;
                 }
                 let (code, len) = (p[i], p[i + 1] as usize);
-                let Some(v) = p.get(i + 2..i + 2 + len) else {
-                    break;
-                };
+                let Some(v) = p.get(i + 2..i + 2 + len) else { break };
                 match code {
                     53 if len == 1 => kind = v[0],
                     1 if len == 4 => mask = v.try_into().expect("4"),
                     3 if len >= 4 => router = v[..4].try_into().expect("4"),
                     54 if len == 4 => server = v.try_into().expect("4"),
-                    6 => {
-                        dns = v
-                            .chunks_exact(4)
-                            .map(|c| c.try_into().expect("4"))
-                            .collect()
-                    }
+                    6 => dns = v.chunks_exact(4).map(|c| c.try_into().expect("4")).collect(),
                     _ => {}
                 }
                 i += 2 + len;
             }
             match (&self.state, kind) {
                 (DhcpState::Discovering, 2) => {
-                    self.state = DhcpState::Requesting {
-                        offered: yiaddr,
-                        server,
-                    };
+                    self.state = DhcpState::Requesting { offered: yiaddr, server };
                     self.attempt = 0;
                     self.send()?;
                 }
                 (DhcpState::Requesting { .. }, 5) => {
-                    let lease = Lease {
-                        ip: yiaddr,
-                        prefix: u32::from_be_bytes(mask).count_ones() as u8,
-                        gateway: router,
-                        dns,
-                    };
+                    let lease = Lease { ip: yiaddr, prefix: u32::from_be_bytes(mask).count_ones() as u8, gateway: router, dns };
                     let mut nl = Netlink::open(libc::NETLINK_ROUTE)?;
                     netlink::add_address(&mut nl, self.index, lease.ip, lease.prefix)?;
                     netlink::add_default_route(&mut nl, self.index, lease.gateway)?;
@@ -541,8 +422,7 @@ impl Dhcp {
 
 fn random_u32() -> u32 {
     let mut b = [0u8; 4];
-    let _ = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
     u32::from_ne_bytes(b) | 1
 }
 
@@ -558,23 +438,13 @@ fn sockaddr(ip: [u8; 4], port: u16) -> libc::sockaddr_in {
 fn mac_of(name: &str) -> io::Result<[u8; 6]> {
     // SAFETY: plain socket + SIOCGIFHWADDR on a zeroed ifreq.
     unsafe {
-        let fd = sys::check(
-            libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) as _,
-            "socket",
-        )?;
+        let fd = sys::check(libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) as _, "socket")?;
         let sock = OwnedFd::from_raw_fd(fd as i32);
         let mut req: libc::ifreq = std::mem::zeroed();
         for (d, s) in req.ifr_name.iter_mut().zip(name.bytes()) {
             *d = s as libc::c_char;
         }
-        sys::check(
-            libc::ioctl(
-                sock.as_raw_fd(),
-                libc::SIOCGIFHWADDR as libc::Ioctl,
-                &mut req,
-            ) as _,
-            "hwaddr",
-        )?;
+        sys::check(libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFHWADDR as libc::Ioctl, &mut req) as _, "hwaddr")?;
         let mut mac = [0u8; 6];
         for (d, s) in mac.iter_mut().zip(req.ifr_ifru.ifru_hwaddr.sa_data.iter()) {
             *d = *s as u8;
@@ -598,13 +468,7 @@ impl Bridges {
     /// and brings it up, with its rules in Kiri's tables. All or nothing: on
     /// an error the bridge is gone again and not recorded, so the next
     /// container tries afresh rather than starting with half the rules.
-    pub fn ensure(
-        &mut self,
-        name: &str,
-        gateway: Option<[u8; 4]>,
-        prefix: u8,
-        v6: Option<Ip6>,
-    ) -> io::Result<i32> {
+    pub fn ensure(&mut self, name: &str, gateway: Option<[u8; 4]>, prefix: u8, v6: Option<Ip6>) -> io::Result<i32> {
         let want6 = v6.map(|v| (v.gateway, v.prefix));
         match self.made.get(name) {
             Some(&(i, g, p, b6)) if (g, p, b6) == (gateway, prefix, want6) => return Ok(i),
@@ -620,10 +484,7 @@ impl Bridges {
             if let Ok(mut nl) = Netlink::open(libc::NETLINK_ROUTE) {
                 let _ = netlink::delete_link(&mut nl, name);
             }
-            MADE_BRIDGES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .retain(|m| m != name);
+            MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|m| m != name);
             let had6 = matches!(self.made.remove(name), Some((.., Some(_))));
             let _ = refresh_nat();
             if had6 {
@@ -633,13 +494,7 @@ impl Bridges {
         r
     }
 
-    fn bring_up(
-        &mut self,
-        name: &str,
-        gateway: Option<[u8; 4]>,
-        prefix: u8,
-        v6: Option<Ip6>,
-    ) -> io::Result<i32> {
+    fn bring_up(&mut self, name: &str, gateway: Option<[u8; 4]>, prefix: u8, v6: Option<Ip6>) -> io::Result<i32> {
         let mut nl = Netlink::open(libc::NETLINK_ROUTE)?;
         netlink::create_bridge(&mut nl, name)?;
         let mut made = MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner());
@@ -659,17 +514,11 @@ impl Bridges {
             // Published ports on a Linux host are relayed on loopback, never
             // DNATed from 127.0.0.1, so the bridge needs no `route_localnet`;
             // an older engine set it on bridges that may still exist.
-            let _ = sys::write_file(
-                &format!("/proc/sys/net/ipv4/conf/{name}/route_localnet"),
-                "0",
-            );
+            let _ = sys::write_file(&format!("/proc/sys/net/ipv4/conf/{name}/route_localnet"), "0");
         }
         // The forward filter's rule for this bridge.
         refresh_nat()?;
-        self.made.insert(
-            name.to_owned(),
-            (index, gateway, prefix, v6.map(|v| (v.gateway, v.prefix))),
-        );
+        self.made.insert(name.to_owned(), (index, gateway, prefix, v6.map(|v| (v.gateway, v.prefix))));
         if let Some(v) = v6 {
             self.update_v6(Some(v))?;
         }
@@ -682,10 +531,7 @@ impl Bridges {
         if let Ok(mut nl) = Netlink::open(libc::NETLINK_ROUTE) {
             let _ = netlink::delete_link(&mut nl, name);
         }
-        MADE_BRIDGES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|m| m != name);
+        MADE_BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|m| m != name);
         if let Err(e) = refresh_nat() {
             eprintln!("kiri-init: NAT: {e}");
         }
@@ -704,15 +550,7 @@ impl Bridges {
         let mut names: Vec<String> = Vec::new();
         for (name, (.., b6)) in &self.made {
             if let Some((g, p)) = *b6 {
-                subnets.push((
-                    Ip6 {
-                        ip: g,
-                        prefix: p,
-                        gateway: g,
-                    }
-                    .subnet(),
-                    p,
-                ));
+                subnets.push((Ip6 { ip: g, prefix: p, gateway: g }.subnet(), p));
                 names.push(name.clone());
             }
         }
@@ -742,10 +580,7 @@ fn ipv6_forwarding(on: bool) -> io::Result<()> {
         if saved.is_some() {
             return Ok(());
         }
-        let old = std::fs::read_to_string(format!("{conf}/all/forwarding"))
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
+        let old = std::fs::read_to_string(format!("{conf}/all/forwarding")).unwrap_or_default().trim().to_owned();
         if old == "1" {
             *saved = Some((old, Vec::new()));
             return Ok(());
@@ -753,16 +588,11 @@ fn ipv6_forwarding(on: bool) -> io::Result<()> {
         let mut raised = Vec::new();
         for entry in std::fs::read_dir(conf)?.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if matches!(name.as_str(), "all" | "default" | "lo")
-                || name.starts_with("kiri")
-                || name.starts_with("kv")
-            {
+            if matches!(name.as_str(), "all" | "default" | "lo") || name.starts_with("kiri") || name.starts_with("kv") {
                 continue;
             }
             let path = format!("{conf}/{name}/accept_ra");
-            if std::fs::read_to_string(&path).is_ok_and(|v| v.trim() == "1")
-                && sys::write_file(&path, "2").is_ok()
-            {
+            if std::fs::read_to_string(&path).is_ok_and(|v| v.trim() == "1") && sys::write_file(&path, "2").is_ok() {
                 raised.push(name);
             }
         }
@@ -770,10 +600,7 @@ fn ipv6_forwarding(on: bool) -> io::Result<()> {
         *saved = Some((old, raised));
     } else if let Some((old, raised)) = saved.take() {
         if old != "1" {
-            let _ = sys::write_file(
-                &format!("{conf}/all/forwarding"),
-                if old.is_empty() { "0" } else { &old },
-            );
+            let _ = sys::write_file(&format!("{conf}/all/forwarding"), if old.is_empty() { "0" } else { &old });
         }
         for name in raised {
             let _ = sys::write_file(&format!("{conf}/{name}/accept_ra"), "1");
@@ -818,19 +645,7 @@ pub fn attach_container(
     v6: Option<Ip6>,
     plug: Plug,
 ) -> io::Result<()> {
-    attach(
-        bridges,
-        bridge,
-        host_ifname,
-        pid,
-        0,
-        ip,
-        prefix,
-        gateway,
-        mac,
-        v6,
-        plug,
-    )
+    attach(bridges, bridge, host_ifname, pid, 0, ip, prefix, gateway, mac, v6, plug)
 }
 
 /// Plugs the container into `bridge` as `eth{n}`. Only `eth0` gets the
@@ -842,19 +657,7 @@ pub fn attach_container(
 /// IPv6-only network `ip` is only the name the container is kept by (its
 /// MAC is made from it): neither the interface nor the bridge gets it.
 #[allow(clippy::too_many_arguments)]
-pub fn attach(
-    bridges: &mut Bridges,
-    bridge: &str,
-    host_ifname: &str,
-    pid: libc::pid_t,
-    n: u32,
-    ip: [u8; 4],
-    prefix: u8,
-    gateway: [u8; 4],
-    mac: Option<[u8; 6]>,
-    v6: Option<Ip6>,
-    plug: Plug,
-) -> io::Result<()> {
+pub fn attach(bridges: &mut Bridges, bridge: &str, host_ifname: &str, pid: libc::pid_t, n: u32, ip: [u8; 4], prefix: u8, gateway: [u8; 4], mac: Option<[u8; 6]>, v6: Option<Ip6>, plug: Plug) -> io::Result<()> {
     let Plug { internal, no_ipv4 } = plug;
     let mac = Some(mac.unwrap_or_else(|| mac_for(ip)));
     let bridge_index = bridges.ensure(bridge, (!no_ipv4).then_some(gateway), prefix, v6)?;
@@ -863,26 +666,13 @@ pub fn attach(
     // A stopped container's veth may still hold this address and MAC.
     delete_retired(&mut host);
     let ifname = format!("eth{n}");
-    netlink::create_veth(
-        &mut host,
-        host_ifname,
-        bridge_index,
-        &netns,
-        CONTAINER_MTU,
-        &ifname,
-        mac,
-    )?;
+    netlink::create_veth(&mut host, host_ifname, bridge_index, &netns, CONTAINER_MTU, &ifname, mac)?;
     // By name: a new namespace may have tunl0, gre0 … before it.
     let index = netlink::index_in(&netns, &ifname)?;
     if v6.is_none() {
         // Before it is up, so it never gets a link-local address. A kernel
         // without IPv6 has no such file, and nothing to turn off.
-        let _ = netlink::in_netns(&netns, || {
-            sys::write_file(
-                &format!("/proc/sys/net/ipv6/conf/{ifname}/disable_ipv6"),
-                "1",
-            )
-        });
+        let _ = netlink::in_netns(&netns, || sys::write_file(&format!("/proc/sys/net/ipv6/conf/{ifname}/disable_ipv6"), "1"));
     }
     let mut inner = Netlink::open_in(&netns)?;
     netlink::set_up(&mut inner, 1)?; // lo
@@ -914,10 +704,7 @@ static RETIRED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 /// to the old namespace, and that answered with resets (a download that
 /// broke mid-TLS or stalled).
 pub fn retire(veths: &[String]) {
-    RETIRED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .extend_from_slice(veths);
+    RETIRED.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(veths);
 }
 
 /// Deletes the veths `retire` noted. Gone already (the kernel took them
@@ -941,16 +728,9 @@ pub fn detach(host_ifname: &str) -> io::Result<()> {
 pub fn listening(pid: libc::pid_t) -> Vec<String> {
     let mut out = Vec::new();
     for file in ["tcp", "tcp6"] {
-        let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/net/{file}")) else {
-            continue;
-        };
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/net/{file}")) else { continue };
         // The fourth field is the state; 0A is TCP_LISTEN.
-        out.extend(
-            text.lines()
-                .filter(|l| l.split_whitespace().nth(3) == Some("0A"))
-                .take(512)
-                .map(str::to_owned),
-        );
+        out.extend(text.lines().filter(|l| l.split_whitespace().nth(3) == Some("0A")).take(512).map(str::to_owned));
     }
     out
 }
@@ -969,40 +749,16 @@ mod tests {
     #[test]
     fn ipv6_settings_come_from_the_options() {
         let mut buf = Vec::new();
-        kiri_proto::encode_net_attach(
-            &mut buf,
-            "c1",
-            "eth1",
-            "kiri2",
-            [10, 5, 0, 2],
-            24,
-            [10, 5, 0, 1],
-            &["web"],
-            &["ip6=fd00:1::2/64", "gw6=fd00:1::1"],
-        );
-        let Ok(kiri_proto::Msg::NetAttach { net, .. }) = kiri_proto::decode(&buf) else {
-            panic!()
-        };
+        kiri_proto::encode_net_attach(&mut buf, "c1", "eth1", "kiri2", [10, 5, 0, 2], 24, [10, 5, 0, 1], &["web"], &["ip6=fd00:1::2/64", "gw6=fd00:1::1"]);
+        let Ok(kiri_proto::Msg::NetAttach { net, .. }) = kiri_proto::decode(&buf) else { panic!() };
         let v = Ip6::from_opts(net.opts).unwrap();
         assert_eq!(ip6_str(v.ip), "fd00:1::2");
         assert_eq!(ip6_str(v.gateway), "fd00:1::1");
         assert_eq!(v.prefix, 64);
         assert_eq!(ip6_str(v.subnet()), "fd00:1::");
         let mut buf = Vec::new();
-        kiri_proto::encode_net_attach::<&str>(
-            &mut buf,
-            "c1",
-            "eth1",
-            "kiri2",
-            [10, 5, 0, 2],
-            24,
-            [10, 5, 0, 1],
-            &[],
-            &[],
-        );
-        let Ok(kiri_proto::Msg::NetAttach { net, .. }) = kiri_proto::decode(&buf) else {
-            panic!()
-        };
+        kiri_proto::encode_net_attach::<&str>(&mut buf, "c1", "eth1", "kiri2", [10, 5, 0, 2], 24, [10, 5, 0, 1], &[], &[]);
+        let Ok(kiri_proto::Msg::NetAttach { net, .. }) = kiri_proto::decode(&buf) else { panic!() };
         assert_eq!(Ip6::from_opts(net.opts), None);
     }
 }

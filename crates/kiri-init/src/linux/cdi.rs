@@ -37,20 +37,11 @@ impl Cdi {
     pub fn add(&mut self, f: &[&str]) -> Option<()> {
         let abs = |p: &str| p.starts_with('/') && !p.split('/').any(|c| c == "..");
         match f {
-            ["link", target, link] if !target.is_empty() && abs(link) => {
-                self.links.push(((*target).to_owned(), (*link).to_owned()))
-            }
+            ["link", target, link] if !target.is_empty() && abs(link) => self.links.push(((*target).to_owned(), (*link).to_owned())),
             ["folder", dir] if abs(dir) => self.folders.push((*dir).to_owned()),
             ["ldconfig"] => self.ldconfig = true,
-            ["compat", v]
-                if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.') =>
-            {
-                self.compat = Some((*v).to_owned())
-            }
-            ["chmod", mode, path] if abs(path) => self.chmods.push((
-                u32::from_str_radix(mode, 8).ok().filter(|m| *m <= 0o7777)?,
-                (*path).to_owned(),
-            )),
+            ["compat", v] if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit() || b == b'.') => self.compat = Some((*v).to_owned()),
+            ["chmod", mode, path] if abs(path) => self.chmods.push((u32::from_str_radix(mode, 8).ok().filter(|m| *m <= 0o7777)?, (*path).to_owned())),
             ["nomodify"] => self.no_modify = true,
             _ => return None,
         }
@@ -68,19 +59,13 @@ const CDI_CONF: &str = "/etc/ld.so.conf.d/00-kiri-1-cdi.conf";
 
 /// The ldconfig to run, the container's own: Debian and Ubuntu's
 /// /sbin/ldconfig is a shell script around ldconfig.real.
-const LDCONFIG: [&str; 3] = [
-    "/sbin/ldconfig.real",
-    "/sbin/ldconfig",
-    "/usr/sbin/ldconfig",
-];
+const LDCONFIG: [&str; 3] = ["/sbin/ldconfig.real", "/sbin/ldconfig", "/usr/sbin/ldconfig"];
 
 /// Carries out `c` in the container (after pivot_root).
 pub fn apply(c: &Cdi) -> io::Result<()> {
     for (mode, path) in &c.chmods {
         match fs::set_permissions(path, fs::Permissions::from_mode(*mode)) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                return Err(io::Error::new(e.kind(), format!("chmod {path}: {e}")));
-            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io::Error::new(e.kind(), format!("chmod {path}: {e}"))),
             _ => {}
         }
     }
@@ -91,16 +76,11 @@ pub fn apply(c: &Cdi) -> io::Result<()> {
             continue;
         }
         if let Some(parent) = Path::new(link).parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| io::Error::new(e.kind(), format!("symlink {link}: {e}")))?;
+            fs::create_dir_all(parent).map_err(|e| io::Error::new(e.kind(), format!("symlink {link}: {e}")))?;
         }
-        std::os::unix::fs::symlink(target, link)
-            .map_err(|e| io::Error::new(e.kind(), format!("symlink {link} -> {target}: {e}")))?;
+        std::os::unix::fs::symlink(target, link).map_err(|e| io::Error::new(e.kind(), format!("symlink {link} -> {target}: {e}")))?;
     }
-    let compat = c
-        .compat
-        .as_deref()
-        .filter(|host| compat_wanted(host, &compat_versions(Path::new(COMPAT_DIR))));
+    let compat = c.compat.as_deref().filter(|host| compat_wanted(host, &compat_versions(Path::new(COMPAT_DIR))));
     if compat.is_some() || !c.folders.is_empty() {
         fs::create_dir_all("/etc/ld.so.conf.d")?;
     }
@@ -108,13 +88,7 @@ pub fn apply(c: &Cdi) -> io::Result<()> {
         fs::write(COMPAT_CONF, format!("{COMPAT_DIR}\n"))?;
     }
     if !c.folders.is_empty() {
-        fs::write(
-            CDI_CONF,
-            c.folders
-                .iter()
-                .map(|f| format!("{f}\n"))
-                .collect::<String>(),
-        )?;
+        fs::write(CDI_CONF, c.folders.iter().map(|f| format!("{f}\n")).collect::<String>())?;
     }
     if c.ldconfig || compat.is_some() {
         run_ldconfig()?;
@@ -124,17 +98,10 @@ pub fn apply(c: &Cdi) -> io::Result<()> {
 
 /// Versions of the compat driver's libcuda (`libcuda.so.580.95.05`) in `dir`.
 fn compat_versions(dir: &Path) -> Vec<Vec<u32>> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
     entries
         .flatten()
-        .filter_map(|e| {
-            e.file_name()
-                .to_str()
-                .and_then(|n| n.strip_prefix("libcuda.so."))
-                .and_then(version)
-        })
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("libcuda.so.")).and_then(version))
         .filter(|v| v.len() > 1)
         .collect()
 }
@@ -146,21 +113,14 @@ fn version(s: &str) -> Option<Vec<u32>> {
 /// Whether the image's compat driver should be used: as NVIDIA's hook
 /// decides, only when its major version is newer than the host driver's.
 fn compat_wanted(host: &str, compat: &[Vec<u32>]) -> bool {
-    let Some(host) = version(host) else {
-        return false;
-    };
+    let Some(host) = version(host) else { return false };
     compat.iter().any(|v| v[0] > host[0])
 }
 
 /// Rebuilds the container's ld.so cache, as `update-ldcache` does. An image
 /// without ldconfig (musl, distroless) has no cache to update.
 fn run_ldconfig() -> io::Result<()> {
-    let Some(path) = LDCONFIG
-        .iter()
-        .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file()))
-    else {
-        return Ok(());
-    };
+    let Some(path) = LDCONFIG.iter().find(|p| fs::metadata(p).is_ok_and(|m| m.is_file())) else { return Ok(()) };
     let prog = CString::new(*path).expect("no NUL");
     // SAFETY: fork in the single-threaded container child; the new child
     // only calls async-signal-safe functions before execve or _exit.
@@ -199,17 +159,7 @@ pub fn nvidia_params(host: &str) -> Option<String> {
     if !host.lines().any(|l| l.starts_with("ModifyDeviceFiles:")) {
         return None;
     }
-    Some(
-        host.lines()
-            .map(|l| {
-                if l.starts_with("ModifyDeviceFiles:") {
-                    "ModifyDeviceFiles: 0\n".to_owned()
-                } else {
-                    format!("{l}\n")
-                }
-            })
-            .collect(),
-    )
+    Some(host.lines().map(|l| if l.starts_with("ModifyDeviceFiles:") { "ModifyDeviceFiles: 0\n".to_owned() } else { format!("{l}\n") }).collect())
 }
 
 #[cfg(test)]
@@ -220,36 +170,13 @@ mod tests {
     fn lines_parse() {
         let mut c = Cdi::default();
         assert!(c.is_empty());
-        for f in [
-            &[
-                "link",
-                "libcuda.so.1",
-                "/usr/lib/x86_64-linux-gnu/libcuda.so",
-            ][..],
-            &["folder", "/usr/lib/x86_64-linux-gnu"],
-            &["ldconfig"],
-            &["compat", "580.95.05"],
-            &["chmod", "755", "/dev/dri"],
-            &["nomodify"],
-        ] {
+        for f in [&["link", "libcuda.so.1", "/usr/lib/x86_64-linux-gnu/libcuda.so"][..], &["folder", "/usr/lib/x86_64-linux-gnu"], &["ldconfig"], &["compat", "580.95.05"], &["chmod", "755", "/dev/dri"], &["nomodify"]] {
             assert_eq!(c.add(f), Some(()), "{f:?}");
         }
-        assert_eq!(
-            c.links,
-            [(
-                "libcuda.so.1".to_owned(),
-                "/usr/lib/x86_64-linux-gnu/libcuda.so".to_owned()
-            )]
-        );
+        assert_eq!(c.links, [("libcuda.so.1".to_owned(), "/usr/lib/x86_64-linux-gnu/libcuda.so".to_owned())]);
         assert_eq!(c.chmods, [(0o755, "/dev/dri".to_owned())]);
         assert!(c.ldconfig && c.no_modify && c.compat.as_deref() == Some("580.95.05"));
-        for bad in [
-            &["link", "x", "relative"][..],
-            &["folder", "/a/../b"],
-            &["chmod", "999", "/x"],
-            &["compat", "abc"],
-            &["what"],
-        ] {
+        for bad in [&["link", "x", "relative"][..], &["folder", "/a/../b"], &["chmod", "999", "/x"], &["compat", "abc"], &["what"]] {
             assert_eq!(c.add(bad), None, "{bad:?}");
         }
     }
@@ -263,12 +190,7 @@ mod tests {
         assert!(!compat_wanted("580.95.05", &[]));
         let dir = std::env::temp_dir().join(format!("kiri-compat-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        for f in [
-            "libcuda.so",
-            "libcuda.so.1",
-            "libcuda.so.580.95.05",
-            "libnvidia-ptxjitcompiler.so.580.95.05",
-        ] {
+        for f in ["libcuda.so", "libcuda.so.1", "libcuda.so.580.95.05", "libnvidia-ptxjitcompiler.so.580.95.05"] {
             fs::write(dir.join(f), "").unwrap();
         }
         assert_eq!(compat_versions(&dir), [vec![580, 95, 5]]);
@@ -278,10 +200,7 @@ mod tests {
     #[test]
     fn params_keep_the_driver_from_touching_device_nodes() {
         let host = "ResmanDebugLevel: 4294967295\nModifyDeviceFiles: 1\nDeviceFileUID: 0\n";
-        assert_eq!(
-            nvidia_params(host).unwrap(),
-            "ResmanDebugLevel: 4294967295\nModifyDeviceFiles: 0\nDeviceFileUID: 0\n"
-        );
+        assert_eq!(nvidia_params(host).unwrap(), "ResmanDebugLevel: 4294967295\nModifyDeviceFiles: 0\nDeviceFileUID: 0\n");
         assert_eq!(nvidia_params(""), None);
     }
 }

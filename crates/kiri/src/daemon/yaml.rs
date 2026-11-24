@@ -36,11 +36,7 @@ pub fn parse(text: &str) -> Result<Value, String> {
             continue;
         }
         started = true;
-        lines.push(Line {
-            indent: body.len() - trimmed.len(),
-            text: trimmed,
-            no: i + 1,
-        });
+        lines.push(Line { indent: body.len() - trimmed.len(), text: trimmed, no: i + 1 });
     }
     if lines.is_empty() {
         return Ok(Value::Null);
@@ -62,9 +58,7 @@ fn strip_comment(line: &str) -> &str {
         match c {
             b'\'' if !double => single = !single,
             b'"' if !single && (i == 0 || b[i - 1] != b'\\') => double = !double,
-            b'#' if !single && !double && (i == 0 || b[i - 1] == b' ' || b[i - 1] == b'\t') => {
-                return &line[..i];
-            }
+            b'#' if !single && !double && (i == 0 || b[i - 1] == b' ' || b[i - 1] == b'\t') => return &line[..i],
             _ => {}
         }
     }
@@ -82,11 +76,7 @@ fn is_item(text: &str) -> bool {
 
 impl<'a> Parser<'a> {
     fn node(&mut self, indent: usize) -> Result<Value, String> {
-        if is_item(self.lines[self.at].text) {
-            self.sequence(indent)
-        } else {
-            self.mapping(indent)
-        }
+        if is_item(self.lines[self.at].text) { self.sequence(indent) } else { self.mapping(indent) }
     }
 
     fn sequence(&mut self, indent: usize) -> Result<Value, String> {
@@ -114,11 +104,7 @@ impl<'a> Parser<'a> {
                 // `- key: value` (or `- - x`): a node starting on this line,
                 // indented to where its text starts.
                 let col = l.indent + (l.text.len() - rest.len());
-                self.lines[self.at] = Line {
-                    indent: col,
-                    text: rest,
-                    no: l.no,
-                };
+                self.lines[self.at] = Line { indent: col, text: rest, no: l.no };
                 out.push(self.node(col)?);
                 continue;
             }
@@ -139,8 +125,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let no = l.no;
-            let (key, value) =
-                key_split(l.text).ok_or_else(|| format!("line {no}: expected `key: value`"))?;
+            let (key, value) = key_split(l.text).ok_or_else(|| format!("line {no}: expected `key: value`"))?;
             let key = match scalar(key).map_err(|e| format!("line {no}: {e}"))? {
                 Value::String(s) => s,
                 other => other.to_string(),
@@ -198,11 +183,7 @@ fn scalar(s: &str) -> Result<Value, String> {
     match s.as_bytes().first() {
         Some(b'"') => return double_quoted(s).map(Value::String),
         Some(b'\'') => {
-            let inner = s
-                .strip_prefix('\'')
-                .and_then(|x| x.strip_suffix('\''))
-                .filter(|_| s.len() >= 2)
-                .ok_or("unterminated quote")?;
+            let inner = s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')).filter(|_| s.len() >= 2).ok_or("unterminated quote")?;
             return Ok(Value::String(inner.replace("''", "'")));
         }
         Some(b'[') => {
@@ -210,19 +191,14 @@ fn scalar(s: &str) -> Result<Value, String> {
             if inner.is_empty() {
                 return Ok(Value::Array(Vec::new()));
             }
-            return split_flow(inner)?
-                .into_iter()
-                .map(scalar)
-                .collect::<Result<Vec<_>, _>>()
-                .map(Value::Array);
+            return split_flow(inner)?.into_iter().map(scalar).collect::<Result<Vec<_>, _>>().map(Value::Array);
         }
         Some(b'{') => {
             let inner = s.strip_suffix('}').ok_or("unterminated {")?[1..].trim();
             let mut m = Map::new();
             if !inner.is_empty() {
                 for part in split_flow(inner)? {
-                    let (k, v) =
-                        key_split(part).ok_or_else(|| format!("bad flow entry {part:?}"))?;
+                    let (k, v) = key_split(part).ok_or_else(|| format!("bad flow entry {part:?}"))?;
                     let k = match scalar(k)? {
                         Value::String(s) => s,
                         other => other.to_string(),
@@ -233,9 +209,7 @@ fn scalar(s: &str) -> Result<Value, String> {
             return Ok(Value::Object(m));
         }
         Some(b'|' | b'>') => return Err("block scalars are not supported".into()),
-        Some(b'&' | b'*' | b'!') => {
-            return Err("anchors, aliases and tags are not supported".into());
-        }
+        Some(b'&' | b'*' | b'!') => return Err("anchors, aliases and tags are not supported".into()),
         _ => {}
     }
     Ok(match s {
@@ -244,17 +218,10 @@ fn scalar(s: &str) -> Result<Value, String> {
         "false" | "False" | "FALSE" => Value::Bool(false),
         _ => {
             let digits = s.strip_prefix(['-', '+']).unwrap_or(s);
-            if !digits.is_empty()
-                && digits.bytes().all(|b| b.is_ascii_digit())
-                && !(digits.len() > 1 && digits.starts_with('0'))
-            {
-                s.parse::<i64>()
-                    .map(Value::from)
-                    .unwrap_or_else(|_| Value::String(s.to_owned()))
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && !(digits.len() > 1 && digits.starts_with('0')) {
+                s.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(s.to_owned()))
             } else if let Some(oct) = s.strip_prefix("0o") {
-                i64::from_str_radix(oct, 8)
-                    .map(Value::from)
-                    .unwrap_or_else(|_| Value::String(s.to_owned()))
+                i64::from_str_radix(oct, 8).map(Value::from).unwrap_or_else(|_| Value::String(s.to_owned()))
             } else {
                 Value::String(s.to_owned())
             }
@@ -291,11 +258,7 @@ fn split_flow(s: &str) -> Result<Vec<&str>, String> {
 }
 
 fn double_quoted(s: &str) -> Result<String, String> {
-    let inner = s
-        .strip_prefix('"')
-        .and_then(|x| x.strip_suffix('"'))
-        .filter(|_| s.len() >= 2)
-        .ok_or("unterminated quote")?;
+    let inner = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).filter(|_| s.len() >= 2).ok_or("unterminated quote")?;
     let mut out = String::with_capacity(inner.len());
     let mut it = inner.chars();
     while let Some(c) = it.next() {
@@ -339,10 +302,7 @@ mod tests {
         assert_eq!(v["mode"], "755");
         assert_eq!(v["uuid"], "GPU-4a1b");
         assert_eq!(v["ver"], "580.95.05");
-        assert_eq!(
-            v["link"],
-            "../card1::/dev/dri/by-path/pci-0000:21:00.0-card"
-        );
+        assert_eq!(v["link"], "../card1::/dev/dri/by-path/pci-0000:21:00.0-card");
         assert_eq!(v["url"], "a#b");
         assert_eq!(v["zero"], "0755");
     }
