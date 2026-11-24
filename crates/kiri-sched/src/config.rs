@@ -146,6 +146,12 @@ pub struct Runtime {
     pub concurrency: usize,
     #[serde(default = "d_start")]
     pub start_timeout_secs: u64,
+    /// Give the GPUs back to the home runtime after this long with no
+    /// request in flight or waiting and no hold (for runtimes that block
+    /// everything while loaded, such as a render server). Unset: it stays
+    /// until something else is asked for.
+    #[serde(default)]
+    pub home_after_idle_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -445,6 +451,7 @@ concurrency = 4
 name = "comfyui"
 upstream = "http://127.0.0.1:8188"
 ready = "http://127.0.0.1:8188/system_stats"
+home_after_idle_secs = 600
 
 [[service]]
 name = "dashboard"

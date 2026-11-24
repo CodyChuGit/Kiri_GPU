@@ -27,6 +27,8 @@ that refuses GPUs to anything the scheduler did not grant.
   to interactive work only after `dwell_secs`; agent work waits for an idle
   box until it has waited `agent_aging_secs`; batch requests never move the
   box. A hold (`kiri-sched hold`) wins over everything and refuses the rest.
+  A runtime with `home_after_idle_secs` goes back to the home runtime once it
+  has had no request, nothing waiting and no hold for that long.
 - **How to switch.** Drain (in-flight requests get `drain_secs`), stop every
   other GPU runtime, wait until `nvidia-smi` shows every GPU at or under
   `vram_free_mib`, then start and wait for the readiness URL. A runtime that

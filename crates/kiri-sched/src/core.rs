@@ -122,6 +122,9 @@ pub struct Core {
     /// How long the last good switch to each runtime took, ms.
     switch_ms: BTreeMap<String, u64>,
     switching: bool,
+    /// Since when the ready runtime has had nothing to do (no hold, nothing
+    /// in flight or waiting); see `home_after_idle_secs`.
+    idle_since: Option<u64>,
 }
 
 const BACKOFF_FIRST_MS: u64 = 5_000;
@@ -147,6 +150,7 @@ impl Core {
             last_good: saved.last_good.filter(known),
             switch_ms: BTreeMap::new(),
             switching: false,
+            idle_since: None,
             cfg,
         }
     }
@@ -388,13 +392,30 @@ impl Core {
                     .find(|rt| self.startable(rt, now))
             }
             Phase::Ready { rt: cur, since } => {
+                let busy = self.inflight(cur) > 0 || self.waiting.iter().any(|w| &w.rt == cur);
                 if let Some(h) = hold {
+                    self.idle_since = None;
                     return (h != *cur && self.startable(&h, now)).then_some(h);
                 }
-                let (cand, urgent) = self.wanted(now, Some(cur))?;
-                let busy = self.inflight(cur) > 0 || self.waiting.iter().any(|w| &w.rt == cur);
-                let dwelt = now.saturating_sub(*since) >= self.cfg.sched.dwell_secs * 1000;
-                (!busy || (urgent && dwelt)).then_some(cand)
+                if let Some((cand, urgent)) = self.wanted(now, Some(cur)) {
+                    let dwelt = now.saturating_sub(*since) >= self.cfg.sched.dwell_secs * 1000;
+                    return (!busy || (urgent && dwelt)).then_some(cand);
+                }
+                // Nothing else is wanted: a runtime with an idle limit goes
+                // home once it has had nothing to do for that long.
+                let home = &self.cfg.sched.home;
+                let limit = self.cfg.runtime(cur).and_then(|r| r.home_after_idle_secs);
+                match limit {
+                    Some(secs) if cur != home && !busy => {
+                        let idle = *self.idle_since.get_or_insert(now);
+                        (now.saturating_sub(idle) >= secs * 1000 && self.startable(home, now))
+                            .then(|| home.clone())
+                    }
+                    _ => {
+                        self.idle_since = None;
+                        None
+                    }
+                }
             }
         }
     }
@@ -402,6 +423,7 @@ impl Core {
     /// The switch to `to` begins: the current runtime drains first.
     pub fn switch_begin(&mut self, to: &str) {
         self.switching = true;
+        self.idle_since = None;
         self.phase = match &self.phase {
             Phase::Ready { rt, .. } if rt != to => Phase::Draining {
                 from: rt.clone(),
@@ -666,6 +688,32 @@ mod tests {
         assert_eq!(c.admit(S, "maya", Class::Agent), Admit::Go);
         // Nothing else wanted: no switch.
         assert_eq!(c.want_switch(2 * S), None);
+    }
+
+    #[test]
+    fn an_idle_render_server_gives_the_gpus_back_to_home() {
+        let mut c = core();
+        switch_ok(&mut c, 0);
+        c.set_hold("comfyui", Some(100 * S), "cody").unwrap();
+        assert_eq!(switch_ok(&mut c, S), "comfyui");
+        // Held, then busy: it stays.
+        assert_eq!(c.want_switch(99 * S), None);
+        c.begin("comfyui");
+        assert_eq!(c.want_switch(2000 * S), None);
+        c.end("comfyui");
+        // The idle clock starts when it is last seen idle, not at load.
+        assert_eq!(c.want_switch(2001 * S), None);
+        assert_eq!(c.want_switch(2600 * S), None);
+        // Work in between restarts it.
+        c.begin("comfyui");
+        assert_eq!(c.want_switch(2601 * S), None);
+        c.end("comfyui");
+        assert_eq!(c.want_switch(2602 * S), None);
+        assert_eq!(c.want_switch(3201 * S), None);
+        assert_eq!(c.want_switch(3202 * S), Some("maya".into()));
+        // Home itself never times out.
+        assert_eq!(switch_ok(&mut c, 3203 * S), "maya");
+        assert_eq!(c.want_switch(99_999 * S), None);
     }
 
     #[test]

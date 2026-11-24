@@ -57,6 +57,17 @@ upstream = "http://127.0.0.1:8188"
 ready = "http://127.0.0.1:8188/system_stats"
 concurrency = 2
 
+# A render server that blocks every LLM while loaded: no models, reached
+# through /rt/avatar/…; it goes back to home after 10 idle minutes (no
+# request, nothing waiting, no hold). `kiri-sched use avatar 60` holds it.
+[[runtime]]
+name = "avatar"
+upstream = "http://127.0.0.1:8190"
+ready = "http://127.0.0.1:8190/health"
+concurrency = 1
+start_timeout_secs = 600
+home_after_idle_secs = 600
+
 # Light services: always on, restarted when they stop answering.
 [[service]]
 name = "dashboard"
