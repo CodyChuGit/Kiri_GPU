@@ -1,0 +1,33 @@
+# kiri-sched GPU runtime "xolotl-qwen" (replaces ~/llm/container/use + krun). Started and
+# stopped only by kiri-sched through kiri-run@xolotl-qwen.service; never run it by hand.
+name: xolotl-qwen
+services:
+  engine:
+    image: box-runtime:1
+    container_name: rt-xolotl-qwen
+    network_mode: host
+    ipc: host
+    restart: "no"
+    labels:
+      dev.kiri.sched.runtime: xolotl-qwen
+    working_dir: /home/rtx3090/llm/engines/Xolotl
+    command: [".venv/bin/python", "-m", "serve.server", "--engine", "strata", "--config", "/home/rtx3090/llm/bench/xolotl-orca-2gpu.json", "--port", "8099"]
+    environment:
+      HOME: /home/rtx3090
+      PYTHONUNBUFFERED: "1"
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 1048576, hard: 1048576}
+    volumes:
+      - /home/rtx3090/llm:/home/rtx3090/llm
+      - /models:/models
+      - /cache:/cache
+      - /usr/local/cuda-13.1:/usr/local/cuda-13.1:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stop_grace_period: 20s

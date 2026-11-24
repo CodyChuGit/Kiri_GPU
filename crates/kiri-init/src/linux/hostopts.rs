@@ -65,6 +65,9 @@ pub struct HostOpts {
     pub groups: Vec<String>,
     /// What CDI specs' hooks ask for (`cdi` lines).
     pub cdi: super::cdi::Cdi,
+    /// `/proc/self/oom_score_adj` for the container's processes (`oom`
+    /// line); `None` leaves the agent's own value, which they inherit.
+    pub oom_score_adj: Option<i32>,
 }
 
 fn bad(line: &str) -> io::Error {
@@ -114,10 +117,27 @@ pub fn parse(list: StrList<'_>) -> io::Result<HostOpts> {
             ["devrule", kind, major, minor, perms] => o.rules.push(devices::parse_rule(kind, major, minor, perms).ok_or_else(|| bad(line))?),
             ["group", g] if !g.is_empty() => o.groups.push((*g).to_owned()),
             ["cdi", rest @ ..] => o.cdi.add(rest).ok_or_else(|| bad(line))?,
+            ["oom", v] => {
+                let v: i32 = v.parse().map_err(|_| bad(line))?;
+                if !(-1000..=1000).contains(&v) {
+                    return Err(bad(line));
+                }
+                o.oom_score_adj = Some(v);
+            }
             _ => return Err(bad(line)),
         }
     }
     Ok(o)
+}
+
+/// Sets the calling process's OOM score adjustment. Run in the child before
+/// it enters the container, through the host's /proc: raising it needs no
+/// privilege, lowering it needs CAP_SYS_RESOURCE, which the child still has.
+pub fn set_oom_score_adj(v: Option<i32>) -> io::Result<()> {
+    match v {
+        Some(v) => fs::write("/proc/self/oom_score_adj", v.to_string()),
+        None => Ok(()),
+    }
 }
 
 /// Docker's error for a device it cannot add.
@@ -337,7 +357,7 @@ mod tests {
 
     #[test]
     fn parses_and_refuses() {
-        let buf = list(&["rlimit\t7\t65536\t65536", "sysctl\tnet\tnet/core/somaxconn\t1024", "device\t/dev/fuse\t/dev/fuse\trwm", "devrule\tc\t10\t229\trwm", "group\tvideo"]);
+        let buf = list(&["rlimit\t7\t65536\t65536", "sysctl\tnet\tnet/core/somaxconn\t1024", "device\t/dev/fuse\t/dev/fuse\trwm", "devrule\tc\t10\t229\trwm", "group\tvideo", "oom\t-500"]);
         let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else { panic!() };
         let o = parse(l).unwrap();
         assert_eq!(o.rlimits, [(7, 65536, 65536)]);
@@ -345,7 +365,8 @@ mod tests {
         assert_eq!(o.devices[0].container, "/dev/fuse");
         assert_eq!(o.rules.len(), 1);
         assert_eq!(o.groups, ["video"]);
-        for bad in ["sysctl\tnet\tkernel/core_pattern\t|x", "sysctl\tipc\tkernel/../x\t1", "sysctl\tuts\tkernel/hostname\tx", "rlimit\t99\t1\t1", "device\tdev\t/x\trwm", "nope"] {
+        assert_eq!(o.oom_score_adj, Some(-500));
+        for bad in ["oom\t1001", "oom\tx", "sysctl\tnet\tkernel/core_pattern\t|x", "sysctl\tipc\tkernel/../x\t1", "sysctl\tuts\tkernel/hostname\tx", "rlimit\t99\t1\t1", "device\tdev\t/x\trwm", "nope"] {
             let buf = list(&[bad]);
             let kiri_proto::Msg::Retain(l) = kiri_proto::decode(&buf).unwrap() else { panic!() };
             assert!(parse(l).is_err(), "{bad}");

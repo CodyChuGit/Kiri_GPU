@@ -16,6 +16,7 @@ mod filters;
 mod health;
 mod hostetc;
 mod cdi;
+mod gpulease;
 mod hostopts;
 mod mirror;
 mod http;

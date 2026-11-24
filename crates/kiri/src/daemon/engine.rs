@@ -234,6 +234,10 @@ pub struct Spec {
     /// signals and reaps zombies.
     #[serde(default)]
     pub init: Option<bool>,
+    /// `--ipc` (`HostConfig.IpcMode`): `host` shares the host's IPC
+    /// namespace and /dev/shm; anything else is a private one, as before.
+    #[serde(default)]
+    pub ipc_mode: String,
     /// Networks beyond `network_mode` (`docker network connect`, Compose):
     /// name and aliases on it.
     #[serde(default)]
@@ -2498,6 +2502,9 @@ impl Engine {
         if spec.init == Some(true) {
             flags |= run_flags::INIT;
         }
+        if spec.ipc_mode == "host" {
+            flags |= run_flags::IPC_HOST;
+        }
         flags |= spec.security_flags();
         // Every container can reach the Mac, as with Docker Desktop and OrbStack.
         let mut hosts = vec![
@@ -2519,6 +2526,14 @@ impl Engine {
                 return Err(e);
             }
         };
+        // GPUs go only to the runtime the GPU scheduler says holds them
+        // (when this host has one): see `gpulease`.
+        let gpus = super::cdi::wanted(&spec.host_opts).map(|w| super::gpulease::gpus(&w)).unwrap_or_default();
+        if let Err(reason) = super::gpulease::check(&id, &spec.labels, &gpus) {
+            let e = Error::Conflict(reason);
+            self.fail_start(&id, &spec, &e);
+            return Err(e);
+        }
         // GPUs and other CDI devices, from the host's specs as they are now:
         // a driver update since the last start moves the libraries.
         let (env, mounts) = match super::cdi::for_container(&spec.host_opts) {

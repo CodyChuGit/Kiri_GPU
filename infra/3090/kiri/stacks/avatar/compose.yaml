@@ -1,0 +1,42 @@
+# kiri-sched GPU runtime "avatar": resident LongCat-Video-Avatar 1.5 render server (replaces
+# avatar-serve.pre-sched). Started and stopped only by kiri-sched through kiri-run@avatar.service.
+# Jobs go through the file queue ~/llm/avatar/serve/queue (avatar-render); readiness is the
+# /health endpoint avatar-entry.sh (this directory; installed at ~/llm/avatar/) adds on 127.0.0.1:8190.
+name: avatar
+services:
+  render:
+    image: avatar-runtime:1
+    container_name: rt-avatar
+    network_mode: host
+    ipc: host
+    shm_size: 16g
+    restart: "no"
+    labels:
+      dev.kiri.sched.runtime: avatar
+    working_dir: /home/rtx3090/llm/engines/LongCat-Video
+    command: ["bash", "/home/rtx3090/llm/avatar/avatar-entry.sh"]
+    environment:
+      HOME: /home/rtx3090
+      PYTHONUNBUFFERED: "1"
+      LONGCAT_SERVE_DIR: /home/rtx3090/llm/avatar/serve
+      LONGCAT_BSA: "0.9375:1,8,8"
+      LONGCAT_TE_CPU: "1"
+      LONGCAT_AUDIO_OFFLOAD: "1"
+      LONGCAT_FFN_CHUNK: "8192"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      OMP_NUM_THREADS: "16"
+      HF_HOME: /models/hf
+      AVATAR_HEALTH_PORT: "8190"
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+    volumes:
+      - /home/rtx3090/llm:/home/rtx3090/llm
+      - /models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stop_grace_period: 20s

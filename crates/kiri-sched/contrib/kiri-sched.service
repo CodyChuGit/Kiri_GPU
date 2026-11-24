@@ -1,0 +1,63 @@
+# The GPU scheduler. Install: /etc/systemd/system/kiri-sched.service
+#   useradd --system --home-dir /var/lib/kiri-sched --shell /usr/sbin/nologin kiri-sched
+#   install -m 0644 50-kiri-sched.rules /etc/polkit-1/rules.d/
+#   install -d -m 0755 /etc/kiri && touch /etc/kiri/gpu-lease-required
+#   systemctl enable --now kiri-sched
+#
+# GPU runtimes and light services are started by the scheduler through
+# kiri-run@<stack>.service; do not enable those units yourself.
+[Unit]
+Description=Kiri GPU scheduler (one runtime on the GPUs at a time)
+Wants=kiri.service network-online.target
+After=kiri.service network-online.target box-cdi-refresh.service
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/kiri-sched check-config -c /etc/kiri-sched/sched.toml
+ExecStart=/usr/bin/kiri-sched daemon -c /etc/kiri-sched/sched.toml
+User=kiri-sched
+Group=kiri-sched
+RuntimeDirectory=kiri-sched
+RuntimeDirectoryMode=0750
+StateDirectory=kiri-sched
+StateDirectoryMode=0700
+UMask=0077
+# systemd restarts it if the async runtime stops pinging.
+WatchdogSec=30
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+
+# Sandbox: it needs the D-Bus socket (systemctl), its own sockets, local
+# TCP to the runtimes, and the NVIDIA control devices (nvidia-smi).
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+DevicePolicy=closed
+# Major 195 is "nvidia"/"nvidiactl" in /proc/devices on current drivers and
+# "nvidia-frontend" on older ones; a name that matches nothing allows nothing.
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidiactl rw
+DeviceAllow=char-nvidia-frontend rw
+DeviceAllow=char-nvidia-caps r
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,7 @@
 #   --no-validate    don't run tests/gpu-validate.sh at the end
 #   --enable NAME    enable and start kiri-stack@NAME after validation passes
 #   --skip-torch     validation without the ~3 GB PyTorch image
+#   --no-sched       don't install the GPU scheduler (kiri-sched)
 #
 # What it does (safe to re-run; it never overwrites a stack's .env or state):
 #   1. Checks the NVIDIA driver and installs nvidia-container-toolkit (for nvidia-ctk only).
@@ -22,22 +23,27 @@
 #      and gpu-raw.sh in /opt/box/bin.
 #   5. Creates /box/config/kiri/stacks, /box/runtimes, /models, /scratch dirs and
 #      copies the stacks from this repo (existing ones are left alone).
-#   6. Runs tests/gpu-validate.sh and, if only the raw --device route works,
-#      writes /box/config/kiri/gpu-raw.override.yaml.
+#   6. Installs the GPU scheduler (crates/kiri-sched): binary, kiri-sched user,
+#      kiri-sched.service, kiri-run@.service and the polkit rule. It is enabled
+#      only once /etc/kiri-sched/sched.toml exists (an example is put beside it).
+#   7. Runs tests/gpu-validate.sh and, if only the raw --device route works,
+#      writes /box/config/kiri/gpu-raw.override.yaml. Skipped while kiri-sched
+#      owns the GPUs: its test containers would be refused by the GPU lease.
 #
 # Prereq: Ubuntu 26.04 with the NVIDIA driver loaded (box-setup/setup-server.sh).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-BUILD=1 VALIDATE=1 ENABLE="" SKIP_TORCH=""
+BUILD=1 VALIDATE=1 ENABLE="" SKIP_TORCH="" SCHED=1
 while [ $# -gt 0 ]; do
   case $1 in
     --skip-build) BUILD=0 ;;
     --no-validate) VALIDATE=0 ;;
     --enable) ENABLE=${2:?--enable needs a stack name}; shift ;;
     --skip-torch) SKIP_TORCH=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    --no-sched) SCHED=0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -74,7 +80,7 @@ if [ $BUILD = 1 ]; then
   out=$repo/target/box-3090
   chown "$ADMIN" "$repo/target" 2>/dev/null || true
   as_admin "cd '$repo' && CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked \
-    --target x86_64-unknown-linux-musl -p kiri -p kiri-init"
+    --target x86_64-unknown-linux-musl -p kiri -p kiri-init -p kiri-sched"
   bindir=$repo/target/x86_64-unknown-linux-musl/release
   as_admin "cd '$repo' && bash packaging/linux/fetch-cli.sh '$out/cli' && rm -rf '$out/pkg' && bash packaging/linux/build.sh '$bindir' '$out/pkg' x86_64 '$out/cli'"
   deb=$(ls "$out"/pkg/kiri_*_amd64.deb | head -1)
@@ -107,6 +113,12 @@ systemctl enable kiri.service
 if [ -n "${INSTALLED:-}" ]; then systemctl restart kiri.service; else systemctl start kiri.service; fi
 for _ in $(seq 30); do [ -S /run/kiri/docker.sock ] && break; sleep 1; done
 [ -S /run/kiri/docker.sock ] || die "Kiri socket did not appear; journalctl -u kiri -n 50"
+# Builds go through Kiri's own builder. A stale buildx "default" builder
+# container asks for every GPU and would be refused by the GPU lease.
+as_admin 'DOCKER_HOST=unix:///run/kiri/docker.sock kiri build-with kiri' || echo "note: could not set the builder (kiri build-with kiri)"
+# A Kiri restart stops every container, the runtime on the GPUs included;
+# the scheduler notices and starts it again, but sooner if told.
+if [ -n "${INSTALLED:-}" ]; then systemctl try-restart kiri-sched.service 2>/dev/null || true; fi
 
 # ---------------------------------------------------------------------------
 say "4. box-probe, kiri-compose, gpu-raw.sh -> /opt/box/bin"
@@ -127,23 +139,68 @@ for s in "$here"/kiri/stacks/*/; do
   if [ -d "$dst" ]; then
     # Update the compose file, never the .env.
     install -m644 "$s/compose.yaml" "$dst/compose.yaml"
-    install -m644 "$s/.env.example" "$dst/.env.example"
+    [ -f "$s/.env.example" ] && install -m644 "$s/.env.example" "$dst/.env.example"
   else
     cp -r "$s" "$dst"
   fi
-  if [ ! -f "$dst/.env" ]; then
-    install -m600 "$dst/.env.example" "$dst/.env"
-    echo "Created $dst/.env from the example: edit it (image digest, port) before enabling $name."
+  if [ -f "$dst/.env.example" ]; then
+    if [ ! -f "$dst/.env" ]; then
+      install -m600 "$dst/.env.example" "$dst/.env"
+      echo "Created $dst/.env from the example: edit it (image digest, port) before enabling $name."
+    fi
+    chmod 600 "$dst/.env"
   fi
-  chmod 600 "$dst/.env"
   install -d -m750 -o "$ADMIN" "/box/runtimes/$name" "/box/runtimes/$name/state" "/models/$name" "/scratch/$name"
 done
 chown -R "$ADMIN" /box/exchange /models/shared /models/hf /models/torch
 
 # ---------------------------------------------------------------------------
+if [ $SCHED = 1 ]; then
+  say "6. GPU scheduler (kiri-sched)"
+  sched=$repo/crates/kiri-sched/contrib
+  if [ $BUILD = 1 ]; then
+    new=$bindir/kiri-sched
+  else
+    as_admin "cd '$repo' && CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked --target x86_64-unknown-linux-musl -p kiri-sched"
+    new=$repo/target/x86_64-unknown-linux-musl/release/kiri-sched
+  fi
+  [ -x "$new" ] || die "kiri-sched was not built"
+  getent group kiri-sched >/dev/null || groupadd --system kiri-sched
+  id kiri-sched >/dev/null 2>&1 || useradd --system --gid kiri-sched --home-dir /var/lib/kiri-sched --shell /usr/sbin/nologin kiri-sched
+  # The admin socket is 0660 kiri-sched: the admin account may use/hold/release.
+  usermod -aG kiri-sched "$ADMIN"
+  sched_changed=""
+  cmp -s "$new" /usr/bin/kiri-sched || { install -m755 "$new" /usr/bin/kiri-sched; sched_changed=1; }
+  for u in kiri-sched.service kiri-run@.service; do
+    cmp -s "$sched/$u" "/etc/systemd/system/$u" || { install -m644 "$sched/$u" "/etc/systemd/system/$u"; sched_changed=1; }
+  done
+  install -D -m644 "$sched/50-kiri-sched.rules" /etc/polkit-1/rules.d/50-kiri-sched.rules
+  install -d -m750 -g kiri-sched /etc/kiri-sched
+  install -m640 -g kiri-sched "$here/kiri/sched.toml.example" /etc/kiri-sched/sched.example.toml
+  systemctl daemon-reload
+  if [ -f /etc/kiri-sched/sched.toml ]; then
+    kiri-sched check-config -c /etc/kiri-sched/sched.toml || die "fix /etc/kiri-sched/sched.toml (kiri-sched check-config)"
+    systemctl enable kiri-sched.service
+    if [ -n "$sched_changed" ]; then systemctl restart kiri-sched.service; else systemctl start kiri-sched.service; fi
+    kiri-sched status || true
+  else
+    echo "No /etc/kiri-sched/sched.toml yet: copy sched.example.toml there (the box's runtimes), put in"
+    echo "the token hashes (see its header), then: systemctl enable --now kiri-sched"
+    echo "and, once it works, fail closed: install -d /etc/kiri && touch /etc/kiri/gpu-lease-required"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 rc=0
+if [ $VALIDATE = 1 ] && { [ -e /etc/kiri/gpu-lease-required ] || systemctl -q is-active kiri-sched.service; }; then
+  say "7. GPU validation skipped: kiri-sched owns the GPUs"
+  echo "Its test containers would be refused by the GPU lease (or fight the loaded runtime)."
+  echo "To run it anyway: systemctl stop kiri-sched; systemctl stop 'kiri-run@*';"
+  echo "mv /etc/kiri/gpu-lease-required{,.off}; rerun with --skip-build; then put both back."
+  VALIDATE=0
+fi
 if [ $VALIDATE = 1 ]; then
-  say "6. GPU validation"
+  say "7. GPU validation"
   SKIP_TORCH=$SKIP_TORCH PROBE=/opt/box/bin/box-probe RAW=/opt/box/bin/gpu-raw.sh \
     "$here/tests/gpu-validate.sh" | tee /box/config/kiri/gpu-validate.log || rc=${PIPESTATUS[0]}
   rc=${rc:-0}
@@ -155,6 +212,9 @@ if [ $VALIDATE = 1 ]; then
 fi
 
 if [ -n "$ENABLE" ]; then
+  if grep -qs "stack *= *\"$ENABLE\"" /etc/kiri-sched/sched.toml; then
+    die "$ENABLE is a kiri-sched stack: the scheduler starts it (kiri-sched use <runtime>), not kiri-stack@"
+  fi
   if [ "$rc" = 0 ] || [ "$rc" = 3 ]; then
     grep -q 'REPLACE_ME' "/box/config/kiri/stacks/$ENABLE/.env" && die "fill in /box/config/kiri/stacks/$ENABLE/.env first"
     systemctl enable --now "kiri-stack@$ENABLE"

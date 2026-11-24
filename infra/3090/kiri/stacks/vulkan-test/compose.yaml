@@ -1,0 +1,24 @@
+# kiri-sched GPU runtime "vulkan-test": runs `vulkaninfo --summary` on both 3090s and serves the result
+# at http://127.0.0.1:8189/vulkan.txt (its readiness URL). Started only by kiri-sched (kiri-run@vulkan-test).
+# NVIDIA Vulkan needs the driver's GL/Vulkan userspace on the host (libnvidia-gl-595-server: ICD json,
+# libGLX_nvidia, libnvidia-glvkspirv) and a CDI spec generated after it was installed.
+name: vulkan-test
+services:
+  vulkan:
+    image: vulkan-test:1
+    container_name: rt-vulkan-test
+    network_mode: host
+    restart: "no"
+    labels:
+      dev.kiri.sched.runtime: vulkan-test
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: all
+    command: ["sh", "-c", "mkdir -p /tmp/out && vulkaninfo --summary > /tmp/out/vulkan.txt 2>&1; cd /tmp/out && python3 -m http.server 8189 --bind 127.0.0.1"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    stop_grace_period: 10s

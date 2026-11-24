@@ -1,0 +1,74 @@
+# /etc/kiri-sched/sched.toml (mode 0640, root:kiri-sched)
+# Check it with: kiri-sched check-config -c /etc/kiri-sched/sched.toml
+
+[sched]
+listen = "127.0.0.1:7070"   # Caddy proxies here; never expose it directly
+home = "maya-deepseek"      # where the GPUs go when nothing else wants them
+dwell_secs = 180            # a runtime keeps the GPUs this long before interactive work may drain it
+drain_secs = 60             # in-flight requests get this long to finish before a switch
+vram_free_mib = 500         # a GPU counts as empty at or under this
+interactive_wait_secs = 120 # how long a request is held open while its runtime starts
+agent_wait_secs = 600
+batch_wait_secs = 30
+agent_aging_secs = 600      # agent work waiting this long counts as interactive
+fence_after = 3             # failed starts within fence_window_secs fence a runtime
+fence_window_secs = 600
+fence_secs = 1800
+unhealthy_secs = 60         # a ready runtime that stops answering this long is restarted
+
+# Clients: token hashes only (kiri-sched hash-token < token-file).
+[[client]]
+name = "cody"
+token_sha256 = "<64 hex digits>"
+class = "interactive"
+admin = true
+
+[[client]]
+name = "rig-agents"
+token_sha256 = "<64 hex digits>"
+class = "agent"
+
+# GPU runtimes: one at a time holds both 3090s. A model swap that needs a
+# restart is two runtimes (two stacks).
+[[runtime]]
+name = "maya-deepseek"
+upstream = "http://127.0.0.1:8080"
+ready = "http://127.0.0.1:8080/health"
+models = ["deepseek-v4.1-flash"]
+concurrency = 4
+start_timeout_secs = 900
+
+[[runtime]]
+name = "maya-glm"
+upstream = "http://127.0.0.1:8081"
+ready = "http://127.0.0.1:8081/health"
+models = ["glm-5.3-flash"]
+concurrency = 4
+
+[[runtime]]
+name = "xolotl"
+upstream = "http://127.0.0.1:8090"
+models = ["qwen3.8-flash-next"]
+concurrency = 4
+
+[[runtime]]
+name = "comfyui"
+upstream = "http://127.0.0.1:8188"
+ready = "http://127.0.0.1:8188/system_stats"
+concurrency = 2
+
+# A render server that blocks every LLM while loaded: no models, reached
+# through /rt/avatar/…; it goes back to home after 10 idle minutes (no
+# request, nothing waiting, no hold). `kiri-sched use avatar 60` holds it.
+[[runtime]]
+name = "avatar"
+upstream = "http://127.0.0.1:8190"
+ready = "http://127.0.0.1:8190/health"
+concurrency = 1
+start_timeout_secs = 600
+home_after_idle_secs = 600
+
+# Light services: always on, restarted when they stop answering.
+[[service]]
+name = "dashboard"
+ready = "http://127.0.0.1:9000/"

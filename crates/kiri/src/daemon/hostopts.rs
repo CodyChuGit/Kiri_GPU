@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 
 /// The HostConfig keys kept with a container.
-const KEYS: [&str; 6] = ["Ulimits", "Sysctls", "Devices", "DeviceCgroupRules", "GroupAdd", "DeviceRequests"];
+const KEYS: [&str; 7] = ["Ulimits", "Sysctls", "Devices", "DeviceCgroupRules", "GroupAdd", "DeviceRequests", "OomScoreAdj"];
 
 /// `nofile` when the run sets none: what containers get on Docker Desktop
 /// and on Docker Engine under containerd's `LimitNOFILE=infinity`. Without
@@ -54,6 +54,7 @@ pub fn from_host(host: &Value) -> Value {
 pub fn inspect(opts: &Value, key: &str) -> Value {
     match (&opts[key], key) {
         (Value::Null, "Ulimits" | "Devices") => json!([]),
+        (Value::Null, "OomScoreAdj") => json!(0),
         (Value::Null, _) => Value::Null,
         (v, _) => v.clone(),
     }
@@ -133,7 +134,22 @@ pub fn guest_lines(opts: &Value, net_host: bool) -> Result<Vec<String>, String> 
         }
         out.push(format!("group\t{g}"));
     }
+    // Always sent, so a container starts at Docker's 0 rather than with
+    // whatever OOM protection the daemon itself runs under (a unit's
+    // OOMScoreAdjust= is inherited by every process it forks).
+    out.push(format!("oom\t{}", oom_score_adj(&opts["OomScoreAdj"])?));
     Ok(out)
+}
+
+/// `--oom-score-adj`: -1000 to 1000, 0 when not given.
+pub fn oom_score_adj(v: &Value) -> Result<i64, String> {
+    match v {
+        Value::Null => Ok(0),
+        v => match v.as_i64() {
+            Some(n) if (-1000..=1000).contains(&n) => Ok(n),
+            _ => Err(format!("Invalid value {v}, range for oom score adj is [-1000, 1000]")),
+        },
+    }
 }
 
 /// A list of strings, or one string, as the API sends either.
@@ -206,14 +222,32 @@ fn sysctl(key: &str, net_host: bool) -> Result<(&'static str, String), String> {
 mod tests {
     use super::*;
 
+    /// The lines without the `oom` line every container gets.
+    fn lines(r: Result<Vec<String>, String>) -> Vec<String> {
+        let mut v = r.unwrap();
+        assert_eq!(v.pop().as_deref(), Some("oom\t0"));
+        v
+    }
+
+    #[test]
+    fn oom_score_adj_defaults_to_docker_s_zero() {
+        assert_eq!(guest_lines(&json!({}), false).unwrap().last().unwrap(), "oom\t0");
+        assert_eq!(guest_lines(&json!({"OomScoreAdj": 500}), false).unwrap().last().unwrap(), "oom\t500");
+        assert_eq!(guest_lines(&json!({"OomScoreAdj": -1000}), false).unwrap().last().unwrap(), "oom\t-1000");
+        assert!(guest_lines(&json!({"OomScoreAdj": 1001}), false).unwrap_err().contains("range for oom score adj"));
+        assert!(guest_lines(&json!({"OomScoreAdj": "x"}), false).is_err());
+        assert_eq!(from_host(&json!({"OomScoreAdj": 300}))["OomScoreAdj"], 300);
+        assert_eq!(inspect(&json!({}), "OomScoreAdj"), 0);
+    }
+
     #[test]
     fn ulimits_and_the_nofile_default() {
-        let lines = guest_lines(&json!({}), false).unwrap();
-        assert_eq!(lines, ["rlimit\t7\t1048576\t1048576"]);
+        let got = lines(guest_lines(&json!({}), false));
+        assert_eq!(got, ["rlimit\t7\t1048576\t1048576"]);
         let opts = json!({"Ulimits": [{"Name": "nofile", "Soft": 65536, "Hard": 65536}, {"Name": "memlock", "Soft": -1, "Hard": -1}]});
-        assert_eq!(guest_lines(&opts, false).unwrap(), ["rlimit\t7\t65536\t65536", &format!("rlimit\t8\t{UNLIMITED}\t{UNLIMITED}")]);
+        assert_eq!(lines(guest_lines(&opts, false)), ["rlimit\t7\t65536\t65536", &format!("rlimit\t8\t{UNLIMITED}\t{UNLIMITED}")]);
         let opts = json!({"Ulimits": [{"Name": "nproc", "Soft": 10, "Hard": 20}]});
-        assert_eq!(guest_lines(&opts, false).unwrap(), ["rlimit\t6\t10\t20", "rlimit\t7\t1048576\t1048576"]);
+        assert_eq!(lines(guest_lines(&opts, false)), ["rlimit\t6\t10\t20", "rlimit\t7\t1048576\t1048576"]);
         assert_eq!(guest_lines(&json!({"Ulimits": [{"Name": "files", "Soft": 1, "Hard": 1}]}), false).unwrap_err(), "invalid ulimit type: files");
         assert_eq!(
             guest_lines(&json!({"Ulimits": [{"Name": "nofile", "Soft": 10, "Hard": 5}]}), false).unwrap_err(),
@@ -255,8 +289,8 @@ mod tests {
             "sysctl \"net.core.somaxconn\" not allowed in host network namespace"
         );
         // kernel.sem's value has spaces; numbers given as numbers still work.
-        assert_eq!(guest_lines(&json!({"Sysctls": {"kernel.sem": "250 32000 100 128"}}), false).unwrap()[1], "sysctl\tipc\tkernel/sem\t250 32000 100 128");
-        assert_eq!(guest_lines(&json!({"Sysctls": {"net.core.somaxconn": 1024}}), false).unwrap()[1], "sysctl\tnet\tnet/core/somaxconn\t1024");
+        assert_eq!(lines(guest_lines(&json!({"Sysctls": {"kernel.sem": "250 32000 100 128"}}), false))[1], "sysctl\tipc\tkernel/sem\t250 32000 100 128");
+        assert_eq!(lines(guest_lines(&json!({"Sysctls": {"net.core.somaxconn": 1024}}), false))[1], "sysctl\tnet\tnet/core/somaxconn\t1024");
     }
 
     #[test]
@@ -271,7 +305,7 @@ mod tests {
             "GroupAdd": ["video", "1234"],
         });
         assert_eq!(
-            guest_lines(&opts, false).unwrap()[1..],
+            lines(guest_lines(&opts, false))[1..],
             [
                 "device\t/dev/fuse\t/dev/fuse\trwm",
                 "device\t/dev/net/tun\t/dev/net/tun\trwm",
@@ -303,7 +337,7 @@ mod tests {
     #[test]
     fn cdi_devices_are_not_device_paths() {
         let opts = json!({"Devices": [{"PathOnHost": "nvidia.com/gpu=all", "PathInContainer": "nvidia.com/gpu=all", "CgroupPermissions": "rwm"}]});
-        assert_eq!(guest_lines(&opts, false).unwrap(), ["rlimit\t7\t1048576\t1048576"]);
+        assert_eq!(lines(guest_lines(&opts, false)), ["rlimit\t7\t1048576\t1048576"]);
         let kept = from_host(&json!({"DeviceRequests": [{"Driver": "", "Count": -1, "Capabilities": [["gpu"]]}]}));
         assert_eq!(kept["DeviceRequests"][0]["Count"], -1);
     }
