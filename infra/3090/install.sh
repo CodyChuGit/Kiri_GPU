@@ -113,6 +113,9 @@ systemctl enable kiri.service
 if [ -n "${INSTALLED:-}" ]; then systemctl restart kiri.service; else systemctl start kiri.service; fi
 for _ in $(seq 30); do [ -S /run/kiri/docker.sock ] && break; sleep 1; done
 [ -S /run/kiri/docker.sock ] || die "Kiri socket did not appear; journalctl -u kiri -n 50"
+# Builds go through Kiri's own builder. A stale buildx "default" builder
+# container asks for every GPU and would be refused by the GPU lease.
+as_admin 'DOCKER_HOST=unix:///run/kiri/docker.sock kiri build-with kiri' || echo "note: could not set the builder (kiri build-with kiri)"
 # A Kiri restart stops every container, the runtime on the GPUs included;
 # the scheduler notices and starts it again, but sooner if told.
 if [ -n "${INSTALLED:-}" ]; then systemctl try-restart kiri-sched.service 2>/dev/null || true; fi
