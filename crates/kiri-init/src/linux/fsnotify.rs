@@ -77,8 +77,18 @@ mod tests {
 
     #[test]
     fn only_paths_under_the_macs_mount() {
-        let lines = ["M\t/mnt/mac/Users/a/app/main.js", "D\t/etc/passwd", "C\t/mnt/mac/../etc/x", "X\t/mnt/mac/Users/a", "M\t/mnt/mac/", "nonsense"];
-        assert_eq!(valid(lines.into_iter()).collect::<Vec<_>>(), ["M\t/mnt/mac/Users/a/app/main.js\n"]);
+        let lines = [
+            "M\t/mnt/mac/Users/a/app/main.js",
+            "D\t/etc/passwd",
+            "C\t/mnt/mac/../etc/x",
+            "X\t/mnt/mac/Users/a",
+            "M\t/mnt/mac/",
+            "nonsense",
+        ];
+        assert_eq!(
+            valid(lines.into_iter()).collect::<Vec<_>>(),
+            ["M\t/mnt/mac/Users/a/app/main.js\n"]
+        );
     }
 
     #[test]

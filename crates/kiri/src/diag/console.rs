@@ -103,7 +103,10 @@ mod tests {
         let mut serial = std::fs::File::from(fd);
         serial.write_all(b"password=hun").unwrap();
         // A key block, put together here so the file itself holds none.
-        let key = format!("ter2\n-----BEGIN {k}-----\nprivate-data\n-----END {k}-----\n", k = ["PRIVATE", "KEY"].join(" "));
+        let key = format!(
+            "ter2\n-----BEGIN {k}-----\nprivate-data\n-----END {k}-----\n",
+            k = ["PRIVATE", "KEY"].join(" ")
+        );
         serial.write_all(key.as_bytes()).unwrap();
         serial
             .write_all(b"kernel BUG at net/core/skbuff.c:4854!\nlast frame")

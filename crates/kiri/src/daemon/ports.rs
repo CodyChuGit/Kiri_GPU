@@ -103,7 +103,10 @@ struct NatPort(u16);
 
 impl Drop for NatPort {
     fn drop(&mut self) {
-        NAT_IN_USE.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        NAT_IN_USE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
     }
 }
 
@@ -138,8 +141,13 @@ fn nat_budget() -> bool {
 /// A token bucket: `NAT_BURST` full, `NAT_RATE` a second back.
 fn take_budget(state: Option<(f64, Instant)>, now: Instant) -> ((f64, Instant), bool) {
     let (tokens, at) = state.unwrap_or((NAT_BURST, now));
-    let tokens = (tokens + now.saturating_duration_since(at).as_secs_f64() * NAT_RATE).min(NAT_BURST);
-    if tokens >= 1.0 { ((tokens - 1.0, now), true) } else { ((tokens, now), false) }
+    let tokens =
+        (tokens + now.saturating_duration_since(at).as_secs_f64() * NAT_RATE).min(NAT_BURST);
+    if tokens >= 1.0 {
+        ((tokens - 1.0, now), true)
+    } else {
+        ((tokens, now), false)
+    }
 }
 
 /// One relayed connection; `peer` is set for one from another machine.
@@ -164,9 +172,12 @@ impl Drop for TcpPermit {
 
 fn tcp_permit(peer: IpAddr) -> Option<TcpPermit> {
     let peer = peer.to_canonical();
-    let mut remote = (!peer.is_loopback()).then(|| REMOTE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut remote =
+        (!peer.is_loopback()).then(|| REMOTE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()));
     if let Some(peers) = &remote {
-        if peers.get(&peer).copied().unwrap_or(0) >= MAX_PEER_SESSIONS || peers.values().sum::<usize>() >= MAX_REMOTE_SESSIONS {
+        if peers.get(&peer).copied().unwrap_or(0) >= MAX_PEER_SESSIONS
+            || peers.values().sum::<usize>() >= MAX_REMOTE_SESSIONS
+        {
             return None;
         }
     }
@@ -175,7 +186,12 @@ fn tcp_permit(peer: IpAddr) -> Option<TcpPermit> {
         if current >= MAX_TCP_SESSIONS {
             return None;
         }
-        match TCP_SESSIONS.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed) {
+        match TCP_SESSIONS.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => break,
             Err(actual) => current = actual,
         }
@@ -183,7 +199,9 @@ fn tcp_permit(peer: IpAddr) -> Option<TcpPermit> {
     if let Some(peers) = &mut remote {
         *peers.entry(peer).or_default() += 1;
     }
-    Some(TcpPermit { peer: remote.map(|_| peer) })
+    Some(TcpPermit {
+        peer: remote.map(|_| peer),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,7 +231,9 @@ pub struct Forwards {
 
 impl std::fmt::Debug for Forwards {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Forwards").field("bound", &self.bound).finish()
+        f.debug_struct("Forwards")
+            .field("bound", &self.bound)
+            .finish()
     }
 }
 
@@ -255,7 +275,11 @@ pub(super) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 }
 
 fn kernel_host_ip(ip: &str) -> Option<[u8; 4]> {
-    if ip.is_empty() || ip == "0.0.0.0" { Some([0; 4]) } else { ip.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets()) }
+    if ip.is_empty() || ip == "0.0.0.0" {
+        Some([0; 4])
+    } else {
+        ip.parse::<std::net::Ipv4Addr>().ok().map(|a| a.octets())
+    }
 }
 
 /// Linux host: whether the kernel forwards a binding on `ip`. Every IPv4
@@ -276,7 +300,18 @@ fn relays_too(ip: &str) -> bool {
 /// sits beside `0.0.0.0:port` (as Docker binds both) instead of clashing
 /// with it, and serves IPv6 alone.
 fn bind_socket(addr: SocketAddr, udp: bool) -> io::Result<OwnedFd> {
-    let (family, ty) = (if addr.is_ipv6() { libc::AF_INET6 } else { libc::AF_INET }, if udp { libc::SOCK_DGRAM } else { libc::SOCK_STREAM });
+    let (family, ty) = (
+        if addr.is_ipv6() {
+            libc::AF_INET6
+        } else {
+            libc::AF_INET
+        },
+        if udp {
+            libc::SOCK_DGRAM
+        } else {
+            libc::SOCK_STREAM
+        },
+    );
     // SAFETY: plain socket creation; owned at once.
     let fd = unsafe { libc::socket(family, ty, 0) };
     if fd < 0 {
@@ -287,7 +322,15 @@ fn bind_socket(addr: SocketAddr, udp: bool) -> io::Result<OwnedFd> {
     let one: libc::c_int = 1;
     let set = |level, opt| {
         // SAFETY: setsockopt with an int of the stated size.
-        unsafe { libc::setsockopt(sock.as_raw_fd(), level, opt, (&one as *const libc::c_int).cast(), std::mem::size_of::<libc::c_int>() as libc::socklen_t) }
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                level,
+                opt,
+                (&one as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        }
     };
     // As std's TcpListener::bind does: a port in TIME_WAIT can be bound again.
     if !udp {
@@ -298,7 +341,14 @@ fn bind_socket(addr: SocketAddr, udp: bool) -> io::Result<OwnedFd> {
     }
     // SAFETY: the sockaddr storage is filled for `addr`'s family and sized to match.
     let (storage, len) = sockaddr_of(addr);
-    if unsafe { libc::bind(sock.as_raw_fd(), (&storage as *const libc::sockaddr_storage).cast(), len) } != 0 {
+    if unsafe {
+        libc::bind(
+            sock.as_raw_fd(),
+            (&storage as *const libc::sockaddr_storage).cast(),
+            len,
+        )
+    } != 0
+    {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: listen on a bound stream socket we own.
@@ -314,7 +364,9 @@ fn sockaddr_of(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     let len = match addr {
         SocketAddr::V4(a) => {
             // SAFETY: sockaddr_storage is large and aligned enough for a sockaddr_in.
-            let sin = unsafe { &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let sin = unsafe {
+                &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in>()
+            };
             sin.sin_family = libc::AF_INET as libc::sa_family_t;
             sin.sin_port = a.port().to_be();
             sin.sin_addr.s_addr = u32::from_ne_bytes(a.ip().octets());
@@ -326,7 +378,9 @@ fn sockaddr_of(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
         }
         SocketAddr::V6(a) => {
             // SAFETY: as above, for a sockaddr_in6.
-            let sin6 = unsafe { &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            let sin6 = unsafe {
+                &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in6>()
+            };
             sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
             sin6.sin6_port = a.port().to_be();
             sin6.sin6_addr.s6_addr = a.ip().octets();
@@ -344,8 +398,18 @@ fn sockaddr_of(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
 /// `host_ip` and `port` as a socket address: `::1` and `[::1]` both work,
 /// as the CLI sends `-p [::1]:8080:80` bare and the API may bracket it.
 fn host_addr(ip: &str, port: u16) -> io::Result<SocketAddr> {
-    let bare = ip.strip_prefix('[').and_then(|i| i.strip_suffix(']')).unwrap_or(ip);
-    bare.parse::<IpAddr>().map(|a| SocketAddr::new(a, port)).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("bad host address {ip}")))
+    let bare = ip
+        .strip_prefix('[')
+        .and_then(|i| i.strip_suffix(']'))
+        .unwrap_or(ip);
+    bare.parse::<IpAddr>()
+        .map(|a| SocketAddr::new(a, port))
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bad host address {ip}"),
+            )
+        })
 }
 
 /// What one binding listens on: its own address, or with no address both
@@ -354,7 +418,13 @@ fn host_addr(ip: &str, port: u16) -> io::Result<SocketAddr> {
 fn listen_addrs(b: &Binding) -> Vec<(String, bool)> {
     match b.host_ip.as_str() {
         "" => vec![("0.0.0.0".to_owned(), true), ("::".to_owned(), false)],
-        ip => vec![(ip.strip_prefix('[').and_then(|i| i.strip_suffix(']')).unwrap_or(ip).to_owned(), true)],
+        ip => vec![(
+            ip.strip_prefix('[')
+                .and_then(|i| i.strip_suffix(']'))
+                .unwrap_or(ip)
+                .to_owned(),
+            true,
+        )],
     }
 }
 
@@ -365,7 +435,11 @@ fn listen_addrs(b: &Binding) -> Vec<(String, bool)> {
 /// Kiri itself has it, or when lsof says nothing.
 #[cfg(target_os = "macos")]
 fn holder(port: u16, udp: bool) -> Option<String> {
-    let spec = if udp { format!("-iUDP:{port}") } else { format!("-iTCP:{port}") };
+    let spec = if udp {
+        format!("-iUDP:{port}")
+    } else {
+        format!("-iTCP:{port}")
+    };
     let mut cmd = std::process::Command::new("/usr/sbin/lsof");
     cmd.args(["-nP", &spec, "-Fc"]);
     if !udp {
@@ -384,12 +458,21 @@ fn holder(_port: u16, _udp: bool) -> Option<String> {
 /// lines) that is not Kiri's own.
 #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
 fn holder_in(lsof: &str) -> Option<String> {
-    lsof.lines().filter_map(|l| l.strip_prefix('c')).map(str::trim).find(|c| !c.is_empty() && !c.to_ascii_lowercase().starts_with("kiri")).map(str::to_owned)
+    lsof.lines()
+        .filter_map(|l| l.strip_prefix('c'))
+        .map(str::trim)
+        .find(|c| !c.is_empty() && !c.to_ascii_lowercase().starts_with("kiri"))
+        .map(str::to_owned)
 }
 
 /// Binds every port first (so a clash fails the start cleanly), then starts
 /// one accept thread per listener.
-pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]) -> io::Result<Forwards> {
+pub fn start(
+    vm: Arc<VmLink>,
+    id: &str,
+    bindings: &[Binding],
+    target_ip: [u8; 4],
+) -> io::Result<Forwards> {
     let mut listeners = Vec::with_capacity(bindings.len());
     let mut udp = Vec::new();
     for b in bindings {
@@ -400,10 +483,22 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
             let addr = host_addr(&ip, port)?;
             let taken = |e: io::Error| {
                 if e.kind() == io::ErrorKind::AddrInUse {
-                    let shown = if addr.is_ipv6() { format!("[{ip}]") } else { ip.clone() };
+                    let shown = if addr.is_ipv6() {
+                        format!("[{ip}]")
+                    } else {
+                        ip.clone()
+                    };
                     // Docker's words, then who has the port when it is not Kiri.
-                    let by = holder(b.host_port, b.proto == "udp").map(|name| format!(" (in use by {name})")).unwrap_or_default();
-                    io::Error::new(e.kind(), format!("Bind for {shown}:{} failed: port is already allocated{by}", b.host_port))
+                    let by = holder(b.host_port, b.proto == "udp")
+                        .map(|name| format!(" (in use by {name})"))
+                        .unwrap_or_default();
+                    io::Error::new(
+                        e.kind(),
+                        format!(
+                            "Bind for {shown}:{} failed: port is already allocated{by}",
+                            b.host_port
+                        ),
+                    )
                 } else {
                     e
                 }
@@ -411,7 +506,15 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
             // Kiri's own container-domain router on this port lets it go
             // (domains::step_aside), and the bind goes again.
             let bound = bind_socket(addr, b.proto == "udp").or_else(|e| {
-                if e.kind() == io::ErrorKind::AddrInUse && b.proto == "tcp" && port != 0 && super::domains::step_aside(port) { bind_socket(addr, false) } else { Err(e) }
+                if e.kind() == io::ErrorKind::AddrInUse
+                    && b.proto == "tcp"
+                    && port != 0
+                    && super::domains::step_aside(port)
+                {
+                    bind_socket(addr, false)
+                } else {
+                    Err(e)
+                }
             });
             let sock = match bound {
                 Ok(s) => s,
@@ -419,7 +522,11 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
                 // No IPv6 on this host, or `::` of this port held by something
                 // else: IPv4 alone, as Docker does without IPv6.
                 Err(e) => {
-                    crate::diag::debug!("published port has no IPv6 listener", port = port, error = e);
+                    crate::diag::debug!(
+                        "published port has no IPv6 listener",
+                        port = port,
+                        error = e
+                    );
                     continue;
                 }
             };
@@ -436,17 +543,37 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
             listeners.push((b.clone(), ip, port, l));
         }
     }
-    let mut fw = Forwards { wake: Vec::new(), threads: Vec::new(), kernel: None, nat: None, bound: Vec::new() };
+    let mut fw = Forwards {
+        wake: Vec::new(),
+        threads: Vec::new(),
+        kernel: None,
+        nat: None,
+        bound: Vec::new(),
+    };
     // On a Linux host the daemon shares the kernel with the containers, so
     // the kernel can rewrite the packets (nftables DNAT) instead of two
     // user-space relays copying every byte; that serves every address but
     // loopback. The listeners below relay the rest. A target on loopback (a
     // --network host container) stays relayed: that is a local socket.
     if cfg!(target_os = "linux") && target_ip != [127, 0, 0, 1] {
-        let all = udp.iter().map(|(b, ip, port, _)| (b, ip, *port, true)).chain(listeners.iter().map(|(b, ip, port, _)| (b, ip, *port, false)));
+        let all = udp
+            .iter()
+            .map(|(b, ip, port, _)| (b, ip, *port, true))
+            .chain(
+                listeners
+                    .iter()
+                    .map(|(b, ip, port, _)| (b, ip, *port, false)),
+            );
         let mut published = Ok(false);
         for (b, ip, port, is_udp) in all.filter(|(_, ip, ..)| kernel_forwards(ip)) {
-            let p = kiri_proto::Publish { id, udp: is_udp, host_ip: kernel_host_ip(ip).expect("checked IPv4 binding"), host_port: port, to_ip: target_ip, to_port: b.container_port };
+            let p = kiri_proto::Publish {
+                id,
+                udp: is_udp,
+                host_ip: kernel_host_ip(ip).expect("checked IPv4 binding"),
+                host_port: port,
+                to_ip: target_ip,
+                to_port: b.container_port,
+            };
             published = vm.publish(p).map(|()| true);
             if published.is_err() {
                 break;
@@ -455,19 +582,39 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
         match published {
             Ok(any) => {
                 // Sockets only the kernel serves stay bound, so the ports read as taken.
-                let (kernel_udp, relay_udp): (Vec<_>, Vec<_>) = udp.into_iter().partition(|(_, ip, ..)| !relays_too(ip));
-                let (kernel_tcp, relay_tcp): (Vec<_>, Vec<_>) = listeners.into_iter().partition(|(_, ip, ..)| !relays_too(ip));
-                fw.bound.extend(kernel_udp.iter().map(|(b, ip, port, _)| (b.clone(), ip.clone(), *port)));
-                fw.bound.extend(kernel_tcp.iter().map(|(b, ip, port, _)| (b.clone(), ip.clone(), *port)));
+                let (kernel_udp, relay_udp): (Vec<_>, Vec<_>) =
+                    udp.into_iter().partition(|(_, ip, ..)| !relays_too(ip));
+                let (kernel_tcp, relay_tcp): (Vec<_>, Vec<_>) = listeners
+                    .into_iter()
+                    .partition(|(_, ip, ..)| !relays_too(ip));
+                fw.bound.extend(
+                    kernel_udp
+                        .iter()
+                        .map(|(b, ip, port, _)| (b.clone(), ip.clone(), *port)),
+                );
+                fw.bound.extend(
+                    kernel_tcp
+                        .iter()
+                        .map(|(b, ip, port, _)| (b.clone(), ip.clone(), *port)),
+                );
                 if any {
-                    fw.kernel = Some((vm.clone(), id.to_owned(), kernel_tcp.into_iter().map(|(.., s)| s).collect(), kernel_udp.into_iter().map(|(.., s)| s).collect()));
+                    fw.kernel = Some((
+                        vm.clone(),
+                        id.to_owned(),
+                        kernel_tcp.into_iter().map(|(.., s)| s).collect(),
+                        kernel_udp.into_iter().map(|(.., s)| s).collect(),
+                    ));
                 }
                 udp = relay_udp;
                 listeners = relay_tcp;
             }
             Err(e) => {
                 let _ = vm.unpublish(id);
-                crate::diag::warn!("kernel port forwarding failed; relaying in user space", id = &id[..id.len().min(12)], error = e);
+                crate::diag::warn!(
+                    "kernel port forwarding failed; relaying in user space",
+                    id = &id[..id.len().min(12)],
+                    error = e
+                );
             }
         }
     }
@@ -476,21 +623,37 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
         fw.wake.push(wake_w);
         let vm = vm.clone();
         let container_port = b.container_port;
-        fw.threads.push(std::thread::Builder::new().name(format!("kiri-udp-{port}")).spawn(move || {
-            udp_loop(&sock, &wake_r, &vm, target_ip, container_port);
-        })?);
+        fw.threads.push(
+            std::thread::Builder::new()
+                .name(format!("kiri-udp-{port}"))
+                .spawn(move || {
+                    udp_loop(&sock, &wake_r, &vm, target_ip, container_port);
+                })?,
+        );
         fw.bound.push((b, ip, port));
     }
     // In the VM: the guest kernel forwards each TCP binding from a port of
     // its own on the NAT network. A target on loopback stays relayed.
     let mut nat = vec![None; listeners.len()];
     if cfg!(target_os = "macos") && target_ip != [127, 0, 0, 1] && !listeners.is_empty() {
-        match publish_nat(&vm, id, &listeners.iter().map(|(b, ..)| b.container_port).collect::<Vec<_>>(), target_ip) {
+        match publish_nat(
+            &vm,
+            id,
+            &listeners
+                .iter()
+                .map(|(b, ..)| b.container_port)
+                .collect::<Vec<_>>(),
+            target_ip,
+        ) {
             Ok((addrs, ports)) => {
                 nat = addrs.into_iter().map(Some).collect();
                 fw.nat = Some((vm.clone(), id.to_owned(), ports));
             }
-            Err(e) => crate::diag::warn!("NAT port forwarding unavailable; relaying over vsock", id = &id[..id.len().min(12)], error = e),
+            Err(e) => crate::diag::warn!(
+                "NAT port forwarding unavailable; relaying over vsock",
+                id = &id[..id.len().min(12)],
+                error = e
+            ),
         }
     }
     for ((b, ip, port, listener), nat) in listeners.into_iter().zip(nat) {
@@ -498,9 +661,13 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
         fw.wake.push(wake_w);
         let vm = vm.clone();
         let container_port = b.container_port;
-        fw.threads.push(std::thread::Builder::new().name(format!("kiri-port-{port}")).spawn(move || {
-            accept_loop(&listener, &wake_r, &vm, target_ip, container_port, nat);
-        })?);
+        fw.threads.push(
+            std::thread::Builder::new()
+                .name(format!("kiri-port-{port}"))
+                .spawn(move || {
+                    accept_loop(&listener, &wake_r, &vm, target_ip, container_port, nat);
+                })?,
+        );
         fw.bound.push((b, ip, port));
     }
     Ok(fw)
@@ -508,7 +675,12 @@ pub fn start(vm: Arc<VmLink>, id: &str, bindings: &[Binding], target_ip: [u8; 4]
 
 /// Asks the agent to forward a guest port to each container port, from the
 /// Mac only; returns the address the Mac dials for each. All or nothing.
-fn publish_nat(vm: &VmLink, id: &str, container_ports: &[u16], target_ip: [u8; 4]) -> io::Result<(Vec<SocketAddr>, Vec<NatPort>)> {
+fn publish_nat(
+    vm: &VmLink,
+    id: &str,
+    container_ports: &[u16],
+    target_ip: [u8; 4],
+) -> io::Result<(Vec<SocketAddr>, Vec<NatPort>)> {
     let (guest_ip, _gateway) = vm.uplink()?;
     let mut addrs = Vec::with_capacity(container_ports.len());
     let mut ports = Vec::with_capacity(container_ports.len());
@@ -517,7 +689,14 @@ fn publish_nat(vm: &VmLink, id: &str, container_ports: &[u16], target_ip: [u8; 4
             let _ = vm.unpublish(id);
             return Err(io::Error::other("no free guest port"));
         };
-        let publish = kiri_proto::Publish { id, udp: false, host_ip: guest_ip, host_port: p.0, to_ip: target_ip, to_port };
+        let publish = kiri_proto::Publish {
+            id,
+            udp: false,
+            host_ip: guest_ip,
+            host_port: p.0,
+            to_ip: target_ip,
+            to_port,
+        };
         if let Err(e) = vm.publish(publish) {
             let _ = vm.unpublish(id);
             return Err(e);
@@ -548,7 +727,8 @@ impl UdpSession {
 /// Datagrams from each client go to the container over its own session;
 /// replies come back to that client. Quiet sessions close.
 fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], port: u16) {
-    let mut sessions: std::collections::HashMap<SocketAddr, UdpSession> = std::collections::HashMap::new();
+    let mut sessions: std::collections::HashMap<SocketAddr, UdpSession> =
+        std::collections::HashMap::new();
     let mut buf = vec![0u8; 65_536];
     loop {
         let mut fds = [
@@ -576,7 +756,8 @@ fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], por
                 // Cap sessions so a source-spoofing flood cannot exhaust
                 // threads and guest connections; drop the oldest to make room.
                 if sessions.len() >= 1024 {
-                    if let Some(old) = sessions.iter().min_by_key(|(_, s)| s.last).map(|(p, _)| *p) {
+                    if let Some(old) = sessions.iter().min_by_key(|(_, s)| s.last).map(|(p, _)| *p)
+                    {
                         if let Some(s) = sessions.remove(&old) {
                             s.close();
                         }
@@ -600,7 +781,11 @@ fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], por
                 }
             }
         }
-        let idle: Vec<SocketAddr> = sessions.iter().filter(|(_, s)| s.last.elapsed() >= UDP_IDLE || s.reader.is_finished()).map(|(a, _)| *a).collect();
+        let idle: Vec<SocketAddr> = sessions
+            .iter()
+            .filter(|(_, s)| s.last.elapsed() >= UDP_IDLE || s.reader.is_finished())
+            .map(|(a, _)| *a)
+            .collect();
         for a in idle {
             if let Some(s) = sessions.remove(&a) {
                 s.close();
@@ -612,7 +797,13 @@ fn udp_loop(sock: &UdpSocket, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], por
     }
 }
 
-fn open_udp_session(sock: &UdpSocket, vm: &VmLink, ip: [u8; 4], port: u16, peer: SocketAddr) -> io::Result<UdpSession> {
+fn open_udp_session(
+    sock: &UdpSocket,
+    vm: &VmLink,
+    ip: [u8; 4],
+    port: u16,
+    peer: SocketAddr,
+) -> io::Result<UdpSession> {
     let guest = vm.connect(UDP_RELAY_PORT)?;
     let mut to_guest = std::fs::File::from(guest.fd.try_clone()?);
     let mut header = [0u8; 6];
@@ -623,17 +814,19 @@ fn open_udp_session(sock: &UdpSocket, vm: &VmLink, ip: [u8; 4], port: u16, peer:
     // A clone shares the socket (and its non-blocking mode); a send to a
     // client rarely has to wait, and a dropped reply is UDP's to lose.
     let reply = sock.try_clone()?;
-    let reader = std::thread::Builder::new().name("kiri-udp-reply".into()).spawn(move || {
-        let mut len = [0u8; 2];
-        let mut data = vec![0u8; 65_536];
-        while from_guest.read_exact(&mut len).is_ok() {
-            let n = u16::from_be_bytes(len) as usize;
-            if from_guest.read_exact(&mut data[..n]).is_err() {
-                break;
+    let reader = std::thread::Builder::new()
+        .name("kiri-udp-reply".into())
+        .spawn(move || {
+            let mut len = [0u8; 2];
+            let mut data = vec![0u8; 65_536];
+            while from_guest.read_exact(&mut len).is_ok() {
+                let n = u16::from_be_bytes(len) as usize;
+                if from_guest.read_exact(&mut data[..n]).is_err() {
+                    break;
+                }
+                let _ = reply.send_to(&data[..n], peer);
             }
-            let _ = reply.send_to(&data[..n], peer);
-        }
-    })?;
+        })?;
     Ok(UdpSession {
         to_guest,
         last: Instant::now(),
@@ -642,7 +835,14 @@ fn open_udp_session(sock: &UdpSocket, vm: &VmLink, ip: [u8; 4], port: u16, peer:
     })
 }
 
-fn accept_loop(listener: &TcpListener, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8; 4], port: u16, nat: Option<SocketAddr>) {
+fn accept_loop(
+    listener: &TcpListener,
+    wake: &OwnedFd,
+    vm: &Arc<VmLink>,
+    ip: [u8; 4],
+    port: u16,
+    nat: Option<SocketAddr>,
+) {
     loop {
         let mut fds = [
             libc::pollfd {
@@ -671,11 +871,13 @@ fn accept_loop(listener: &TcpListener, wake: &OwnedFd, vm: &Arc<VmLink>, ip: [u8
                 continue;
             };
             let vm = vm.clone();
-            let _ = std::thread::Builder::new().name("kiri-conn".into()).spawn(move || {
-                // Held until the connection is done.
-                let _permit = permit;
-                let _ = relay(client, &vm, ip, port, nat);
-            });
+            let _ = std::thread::Builder::new()
+                .name("kiri-conn".into())
+                .spawn(move || {
+                    // Held until the connection is done.
+                    let _permit = permit;
+                    let _ = relay(client, &vm, ip, port, nat);
+                });
         }
     }
 }
@@ -693,7 +895,11 @@ pub fn open_relay(vm: &VmLink, ip: [u8; 4], port: u16) -> io::Result<kiri_vmm::V
 }
 
 /// `open_relay` on the agent's framed port, where it has one; true if so.
-fn open_framed_relay(vm: &VmLink, ip: [u8; 4], port: u16) -> io::Result<(kiri_vmm::VsockStream, bool)> {
+fn open_framed_relay(
+    vm: &VmLink,
+    ip: [u8; 4],
+    port: u16,
+) -> io::Result<(kiri_vmm::VsockStream, bool)> {
     if !NO_FRAMED_RELAY.load(Ordering::Relaxed) {
         match vm.connect(RELAY_FRAMED_PORT) {
             Ok(guest) => {
@@ -704,14 +910,22 @@ fn open_framed_relay(vm: &VmLink, ip: [u8; 4], port: u16) -> io::Result<(kiri_vm
                 return Ok((guest, true));
             }
             // An older agent: nothing listens there.
-            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => NO_FRAMED_RELAY.store(true, Ordering::Relaxed),
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                NO_FRAMED_RELAY.store(true, Ordering::Relaxed)
+            }
             Err(e) => return Err(e),
         }
     }
     Ok((open_relay(vm, ip, port)?, false))
 }
 
-fn relay(client: TcpStream, vm: &VmLink, ip: [u8; 4], port: u16, nat: Option<SocketAddr>) -> io::Result<()> {
+fn relay(
+    client: TcpStream,
+    vm: &VmLink,
+    ip: [u8; 4],
+    port: u16,
+    nat: Option<SocketAddr>,
+) -> io::Result<()> {
     client.set_nonblocking(false)?;
     relayed_tcp(&client)?;
     // A Linux host reaches the container's address itself.
@@ -731,13 +945,22 @@ fn relay(client: TcpStream, vm: &VmLink, ip: [u8; 4], port: u16, nat: Option<Soc
                 let timed_out = e.kind() == io::ErrorKind::TimedOut;
                 if !timed_out || NAT_TIMEOUTS.fetch_add(1, Ordering::Relaxed) >= 1 {
                     NAT_TIMEOUTS.store(0, Ordering::Relaxed);
-                    *NAT_DOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + NAT_RETRY);
+                    *NAT_DOWN_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Instant::now() + NAT_RETRY);
                     // Once a run as a warning, with what usually causes it;
                     // each retry after that only notes it.
                     if NAT_WARNED.swap(true, Ordering::Relaxed) {
-                        crate::diag::info!("the VM's NAT network is still unreachable; published ports keep going over vsock", to = addr, error = e);
+                        crate::diag::info!(
+                            "the VM's NAT network is still unreachable; published ports keep going over vsock",
+                            to = addr,
+                            error = e
+                        );
                     } else {
-                        crate::diag::warn!("the VM's NAT network is unreachable, so published ports go over vsock (they still work); a VPN, or Kiri not allowed under Local Network in Privacy & Security, usually causes this", to = addr, error = e);
+                        crate::diag::warn!(
+                            "the VM's NAT network is unreachable, so published ports go over vsock (they still work); a VPN, or Kiri not allowed under Local Network in Privacy & Security, usually causes this",
+                            to = addr,
+                            error = e
+                        );
                     }
                 }
             }
@@ -750,15 +973,21 @@ fn relay(client: TcpStream, vm: &VmLink, ip: [u8; 4], port: u16, nat: Option<Soc
     let mut from_guest = std::fs::File::from(guest.fd.try_clone()?);
     let mut client_read = client.try_clone()?;
     let mut client_write = client;
-    let up = std::thread::Builder::new().name("kiri-conn-up".into()).spawn(move || {
-        let how = match pass_on(copy(&mut client_read, &mut to_guest)) {
-            Shutdown::Write => libc::SHUT_WR,
-            _ => libc::SHUT_RDWR,
-        };
-        // SAFETY: shutting down a socket we own.
-        unsafe { libc::shutdown(to_guest.as_raw_fd(), how) };
-    })?;
-    let down = if framed { copy_frames(&mut from_guest, &mut client_write) } else { copy(&mut from_guest, &mut client_write) };
+    let up = std::thread::Builder::new()
+        .name("kiri-conn-up".into())
+        .spawn(move || {
+            let how = match pass_on(copy(&mut client_read, &mut to_guest)) {
+                Shutdown::Write => libc::SHUT_WR,
+                _ => libc::SHUT_RDWR,
+            };
+            // SAFETY: shutting down a socket we own.
+            unsafe { libc::shutdown(to_guest.as_raw_fd(), how) };
+        })?;
+    let down = if framed {
+        copy_frames(&mut from_guest, &mut client_write)
+    } else {
+        copy(&mut from_guest, &mut client_write)
+    };
     let _ = client_write.shutdown(pass_on(down));
     let _ = up.join();
     // `guest` drops here: the vsock connection is released on the VM's queue.
@@ -771,10 +1000,12 @@ fn relay(client: TcpStream, vm: &VmLink, ip: [u8; 4], port: u16, nat: Option<Soc
 fn relay_tcp(client: TcpStream, guest: TcpStream) -> io::Result<()> {
     relayed_tcp(&guest)?;
     let (mut client_read, mut guest_write) = (client.try_clone()?, guest.try_clone()?);
-    let up = std::thread::Builder::new().name("kiri-conn-up".into()).spawn(move || {
-        let how = pass_on(copy(&mut client_read, &mut guest_write));
-        let _ = guest_write.shutdown(how);
-    })?;
+    let up = std::thread::Builder::new()
+        .name("kiri-conn-up".into())
+        .spawn(move || {
+            let how = pass_on(copy(&mut client_read, &mut guest_write));
+            let _ = guest_write.shutdown(how);
+        })?;
     let (mut guest_read, mut client_write) = (guest, client);
     let how = pass_on(copy(&mut guest_read, &mut client_write));
     let _ = client_write.shutdown(how);
@@ -797,9 +1028,11 @@ fn relay_direct(client: TcpStream, ip: [u8; 4], port: u16) -> io::Result<()> {
     let target = TcpStream::connect_timeout(&SocketAddr::from((ip, port)), DIRECT_CONNECT)?;
     relayed_tcp(&target)?;
     let (client_read, target_write) = (client.try_clone()?, target.try_clone()?);
-    let up = std::thread::Builder::new().name("kiri-conn-up".into()).spawn(move || {
-        let _ = target_write.shutdown(pass_on(splice_all(&client_read, &target_write)));
-    })?;
+    let up = std::thread::Builder::new()
+        .name("kiri-conn-up".into())
+        .spawn(move || {
+            let _ = target_write.shutdown(pass_on(splice_all(&client_read, &target_write)));
+        })?;
     let _ = client.shutdown(pass_on(splice_all(&target, &client)));
     let _ = up.join();
     Ok(())
@@ -830,7 +1063,16 @@ fn splice_all(from: &TcpStream, to: &TcpStream) -> io::Result<()> {
     };
     let splice = |from: i32, to: i32, len: usize| loop {
         // SAFETY: splice between descriptors we own, no offsets.
-        let n = unsafe { libc::splice(from, std::ptr::null_mut(), to, std::ptr::null_mut(), len, libc::SPLICE_F_MOVE) };
+        let n = unsafe {
+            libc::splice(
+                from,
+                std::ptr::null_mut(),
+                to,
+                std::ptr::null_mut(),
+                len,
+                libc::SPLICE_F_MOVE,
+            )
+        };
         if n >= 0 {
             return Ok(n as usize);
         }
@@ -922,7 +1164,11 @@ fn copy_frames(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {
 /// opposite direction: with no read deadline it would otherwise wait on a
 /// quiet peer forever, holding the session.
 fn pass_on(copied: io::Result<()>) -> Shutdown {
-    if copied.is_ok() { Shutdown::Write } else { Shutdown::Both }
+    if copied.is_ok() {
+        Shutdown::Write
+    } else {
+        Shutdown::Both
+    }
 }
 
 /// Either end of a relayed TCP connection: no read deadline, a write one, and
@@ -937,12 +1183,28 @@ fn relayed_tcp(s: &TcpStream) -> io::Result<()> {
     let fd = s.as_raw_fd();
     let set = |level, name, v: libc::c_int| {
         // SAFETY: setting an int option on a socket we own, from a local.
-        let r = unsafe { libc::setsockopt(fd, level, name, (&v as *const libc::c_int).cast(), std::mem::size_of::<libc::c_int>() as libc::socklen_t) };
-        if r == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+        let r = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                (&v as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     };
     set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
     set(libc::IPPROTO_TCP, idle, KEEPALIVE_IDLE.as_secs() as _)?;
-    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, KEEPALIVE_INTERVAL.as_secs() as _)?;
+    set(
+        libc::IPPROTO_TCP,
+        libc::TCP_KEEPINTVL,
+        KEEPALIVE_INTERVAL.as_secs() as _,
+    )?;
     set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, KEEPALIVE_PROBES)
 }
 
@@ -954,8 +1216,20 @@ fn vsock_stall(fd: std::os::fd::RawFd) -> io::Result<()> {
         tv_usec: 0,
     };
     // SAFETY: timeout is valid for the duration of the call on an owned socket.
-    let result = unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDTIMEO, (&timeout as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t) };
-    if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            (&timeout as *const libc::timeval).cast(),
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 /// What containers reach as `host.docker.internal`.
@@ -966,9 +1240,11 @@ pub const HOST_BOUND_PORT: u32 = 1026;
 /// One host-bound connection from a container: the guest sends
 /// `ip[4] port[2]` (always 127.0.0.1 today), and we connect there on the Mac.
 pub fn serve_host_bound(stream: kiri_vmm::VsockStream) {
-    let _ = std::thread::Builder::new().name("kiri-host-bound".into()).spawn(move || {
-        let _ = host_bound(stream);
-    });
+    let _ = std::thread::Builder::new()
+        .name("kiri-host-bound".into())
+        .spawn(move || {
+            let _ = host_bound(stream);
+        });
 }
 
 fn host_bound(stream: kiri_vmm::VsockStream) -> io::Result<()> {
@@ -980,8 +1256,14 @@ fn host_bound(stream: kiri_vmm::VsockStream) -> io::Result<()> {
     // The guest's relay only ever asks for the Mac's loopback; anything else
     // is a guest process speaking the protocol itself, which gets nothing.
     if ip != std::net::Ipv4Addr::LOCALHOST {
-        crate::diag::warn!("refused a host-bound connection; only 127.0.0.1 is relayed", to = format!("{ip}:{port}"));
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not loopback"));
+        crate::diag::warn!(
+            "refused a host-bound connection; only 127.0.0.1 is relayed",
+            to = format!("{ip}:{port}")
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "not loopback",
+        ));
     }
     // Refused or unreachable: dropping closes the container's connection,
     // which is what it would see from a real host too.
@@ -990,11 +1272,13 @@ fn host_bound(stream: kiri_vmm::VsockStream) -> io::Result<()> {
     let mut to_guest = std::fs::File::from(stream.fd.try_clone()?);
     let mut target_read = target.try_clone()?;
     let mut target_write = target;
-    let down = std::thread::Builder::new().name("kiri-host-bound-down".into()).spawn(move || {
-        let _ = copy(&mut target_read, &mut to_guest);
-        // SAFETY: half-closing a socket we own.
-        unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
-    })?;
+    let down = std::thread::Builder::new()
+        .name("kiri-host-bound-down".into())
+        .spawn(move || {
+            let _ = copy(&mut target_read, &mut to_guest);
+            // SAFETY: half-closing a socket we own.
+            unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+        })?;
     let _ = copy(&mut from_guest, &mut target_write);
     let _ = target_write.shutdown(Shutdown::Write);
     let _ = down.join();
@@ -1011,34 +1295,43 @@ fn ssh_auth_sock() -> Option<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("SSH_AUTH_SOCK") {
         return Some(p.into());
     }
-    let out = std::process::Command::new("/bin/launchctl").args(["getenv", "SSH_AUTH_SOCK"]).output().ok()?;
+    let out = std::process::Command::new("/bin/launchctl")
+        .args(["getenv", "SSH_AUTH_SOCK"])
+        .output()
+        .ok()?;
     let p = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (!p.is_empty()).then(|| p.into())
 }
 
 /// One container connection to the SSH agent, relayed to the Mac's agent.
 pub fn serve_ssh_agent(stream: kiri_vmm::VsockStream) {
-    let _ = std::thread::Builder::new().name("kiri-ssh-agent".into()).spawn(move || {
-        let Some(path) = ssh_auth_sock() else { return };
-        let Ok(agent) = std::os::unix::net::UnixStream::connect(path) else {
-            return;
-        };
-        let (Ok(mut agent_read), Ok(from_guest), Ok(to_guest)) = (agent.try_clone(), stream.fd.try_clone(), stream.fd.try_clone()) else {
-            return;
-        };
-        let mut from_guest = std::fs::File::from(from_guest);
-        let mut to_guest = std::fs::File::from(to_guest);
-        let mut agent_write = agent;
-        let down = std::thread::spawn(move || {
-            let _ = copy(&mut agent_read, &mut to_guest);
-            // SAFETY: half-closing a socket we own.
-            unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+    let _ = std::thread::Builder::new()
+        .name("kiri-ssh-agent".into())
+        .spawn(move || {
+            let Some(path) = ssh_auth_sock() else { return };
+            let Ok(agent) = std::os::unix::net::UnixStream::connect(path) else {
+                return;
+            };
+            let (Ok(mut agent_read), Ok(from_guest), Ok(to_guest)) = (
+                agent.try_clone(),
+                stream.fd.try_clone(),
+                stream.fd.try_clone(),
+            ) else {
+                return;
+            };
+            let mut from_guest = std::fs::File::from(from_guest);
+            let mut to_guest = std::fs::File::from(to_guest);
+            let mut agent_write = agent;
+            let down = std::thread::spawn(move || {
+                let _ = copy(&mut agent_read, &mut to_guest);
+                // SAFETY: half-closing a socket we own.
+                unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+            });
+            let _ = copy(&mut from_guest, &mut agent_write);
+            let _ = agent_write.shutdown(Shutdown::Write);
+            let _ = down.join();
+            drop(stream);
         });
-        let _ = copy(&mut from_guest, &mut agent_write);
-        let _ = agent_write.shutdown(Shutdown::Write);
-        let _ = down.join();
-        drop(stream);
-    });
 }
 
 /// vsock port the guest dials for the engine's API: containers that mount
@@ -1048,24 +1341,33 @@ pub const ENGINE_API_PORT: u32 = 1036;
 /// One container connection to the engine's API, relayed to this daemon's
 /// own socket, so it is served like any other client.
 pub fn serve_engine_api(stream: kiri_vmm::VsockStream) {
-    let _ = std::thread::Builder::new().name("kiri-engine-api".into()).spawn(move || {
-        let Ok(api) = super::socket_path().and_then(std::os::unix::net::UnixStream::connect) else { return };
-        let (Ok(mut api_read), Ok(from_guest), Ok(to_guest)) = (api.try_clone(), stream.fd.try_clone(), stream.fd.try_clone()) else {
-            return;
-        };
-        let mut from_guest = std::fs::File::from(from_guest);
-        let mut to_guest = std::fs::File::from(to_guest);
-        let mut api_write = api;
-        let down = std::thread::spawn(move || {
-            let _ = copy(&mut api_read, &mut to_guest);
-            // SAFETY: half-closing a socket we own.
-            unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+    let _ = std::thread::Builder::new()
+        .name("kiri-engine-api".into())
+        .spawn(move || {
+            let Ok(api) = super::socket_path().and_then(std::os::unix::net::UnixStream::connect)
+            else {
+                return;
+            };
+            let (Ok(mut api_read), Ok(from_guest), Ok(to_guest)) = (
+                api.try_clone(),
+                stream.fd.try_clone(),
+                stream.fd.try_clone(),
+            ) else {
+                return;
+            };
+            let mut from_guest = std::fs::File::from(from_guest);
+            let mut to_guest = std::fs::File::from(to_guest);
+            let mut api_write = api;
+            let down = std::thread::spawn(move || {
+                let _ = copy(&mut api_read, &mut to_guest);
+                // SAFETY: half-closing a socket we own.
+                unsafe { libc::shutdown(to_guest.as_raw_fd(), libc::SHUT_WR) };
+            });
+            let _ = copy(&mut from_guest, &mut api_write);
+            let _ = api_write.shutdown(Shutdown::Write);
+            let _ = down.join();
+            drop(stream);
         });
-        let _ = copy(&mut from_guest, &mut api_write);
-        let _ = api_write.shutdown(Shutdown::Write);
-        let _ = down.join();
-        drop(stream);
-    });
 }
 
 /// The TCP ports in a container's `/proc/net/tcp` and `tcp6` lines that are
@@ -1084,11 +1386,21 @@ pub fn listening<S: AsRef<str>>(lines: &[S], host_network: bool) -> (Vec<u16>, V
         if f.get(3) != Some(&"0A") {
             continue;
         }
-        let Some((addr, port)) = f.get(1).and_then(|a| a.split_once(':')) else { continue };
-        let Ok(port) = u16::from_str_radix(port, 16) else { continue };
+        let Some((addr, port)) = f.get(1).and_then(|a| a.split_once(':')) else {
+            continue;
+        };
+        let Ok(port) = u16::from_str_radix(port, 16) else {
+            continue;
+        };
         // The kernel prints each 32-bit word of the address in the guest's
         // own byte order, which is little-endian on every guest we run.
-        let words: Option<Vec<[u8; 4]>> = (0..addr.len() / 8).map(|i| addr.get(i * 8..i * 8 + 8).and_then(|w| u32::from_str_radix(w, 16).ok()).map(u32::to_le_bytes)).collect();
+        let words: Option<Vec<[u8; 4]>> = (0..addr.len() / 8)
+            .map(|i| {
+                addr.get(i * 8..i * 8 + 8)
+                    .and_then(|w| u32::from_str_radix(w, 16).ok())
+                    .map(u32::to_le_bytes)
+            })
+            .collect();
         let ok = match (addr.len(), words) {
             (8, Some(w)) => v4_reach(Ipv4Addr::from(w[0])),
             (32, Some(w)) => {
@@ -1098,7 +1410,11 @@ pub fn listening<S: AsRef<str>>(lines: &[S], host_network: bool) -> (Vec<u16>, V
             _ => continue,
         };
         if port != 0 {
-            if ok { reach.insert(port) } else { local.insert(port) };
+            if ok {
+                reach.insert(port)
+            } else {
+                local.insert(port)
+            };
         }
     }
     let local = local.difference(&reach).copied().collect();
@@ -1107,7 +1423,10 @@ pub fn listening<S: AsRef<str>>(lines: &[S], host_network: bool) -> (Vec<u16>, V
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PEER_SESSIONS, MAX_REMOTE_SESSIONS, MAX_TCP_SESSIONS, NAT_PORTS, REMOTE_SESSIONS, TCP_SESSIONS, kernel_forwards, kernel_host_ip, listening, nat_port, relays_too, tcp_permit};
+    use super::{
+        MAX_PEER_SESSIONS, MAX_REMOTE_SESSIONS, MAX_TCP_SESSIONS, NAT_PORTS, REMOTE_SESSIONS,
+        TCP_SESSIONS, kernel_forwards, kernel_host_ip, listening, nat_port, relays_too, tcp_permit,
+    };
     use std::net::IpAddr;
     use std::sync::atomic::Ordering;
 
@@ -1115,8 +1434,14 @@ mod tests {
     #[test]
     fn a_taken_port_names_the_program_that_has_it() {
         use super::holder_in;
-        assert_eq!(holder_in("p85299\ncPython\nf3\n").as_deref(), Some("Python"));
-        assert_eq!(holder_in("p10\nckiri\nf7\np11\ncOrbStack Helper\nf9\n").as_deref(), Some("OrbStack Helper"));
+        assert_eq!(
+            holder_in("p85299\ncPython\nf3\n").as_deref(),
+            Some("Python")
+        );
+        assert_eq!(
+            holder_in("p10\nckiri\nf7\np11\ncOrbStack Helper\nf9\n").as_deref(),
+            Some("OrbStack Helper")
+        );
         assert_eq!(holder_in("p10\nckiri\nf7\n"), None);
         assert_eq!(holder_in("p10\ncKiri Dev\n"), None);
         assert_eq!(holder_in(""), None);
@@ -1183,11 +1508,24 @@ mod tests {
     #[test]
     fn a_port_on_both_families_counts_once() {
         let both: Vec<&str> = TCP.iter().chain(TCP6.iter()).copied().collect();
-        assert_eq!(listening(&both, false), (vec![80, 443, 4567], vec![3306, 8080, 9090]));
+        assert_eq!(
+            listening(&both, false),
+            (vec![80, 443, 4567], vec![3306, 8080, 9090])
+        );
         // Bound to loopback and to every address: reachable, not listed twice.
-        let lines = [TCP[1], TCP[3].replace("0200A8C0:11D7", "0100007F:11D7").replace(" 01 ", " 0A ").as_str()].map(str::to_owned);
+        let lines = [
+            TCP[1],
+            TCP[3]
+                .replace("0200A8C0:11D7", "0100007F:11D7")
+                .replace(" 01 ", " 0A ")
+                .as_str(),
+        ]
+        .map(str::to_owned);
         assert_eq!(listening(&lines, false), (vec![4567], vec![]));
-        assert_eq!(listening(&["garbage", "1: zz:11D7 0:0 0A", ""], false), (vec![], vec![]));
+        assert_eq!(
+            listening(&["garbage", "1: zz:11D7 0:0 0A", ""], false),
+            (vec![], vec![])
+        );
     }
 
     /// A quiet connection stays open, as through docker-proxy (#388); keepalive
@@ -1206,7 +1544,18 @@ mod tests {
             let mut v: libc::c_int = 0;
             let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
             // SAFETY: reading an int option of a socket we own into a local.
-            assert_eq!(unsafe { libc::getsockopt(s.as_raw_fd(), level, name, (&mut v as *mut libc::c_int).cast(), &mut len) }, 0);
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        s.as_raw_fd(),
+                        level,
+                        name,
+                        (&mut v as *mut libc::c_int).cast(),
+                        &mut len,
+                    )
+                },
+                0
+            );
             v
         };
         assert_ne!(opt(libc::SOL_SOCKET, libc::SO_KEEPALIVE), 0);
@@ -1214,13 +1563,18 @@ mod tests {
         let idle = libc::TCP_KEEPALIVE;
         #[cfg(not(target_os = "macos"))]
         let idle = libc::TCP_KEEPIDLE;
-        assert_eq!(opt(libc::IPPROTO_TCP, idle), KEEPALIVE_IDLE.as_secs() as libc::c_int);
+        assert_eq!(
+            opt(libc::IPPROTO_TCP, idle),
+            KEEPALIVE_IDLE.as_secs() as libc::c_int
+        );
     }
 
     #[test]
     fn tcp_permits_are_bounded_and_released() {
         let local: IpAddr = "127.0.0.1".parse().unwrap();
-        let held: Vec<_> = (0..MAX_TCP_SESSIONS).map(|_| tcp_permit(local).expect("permit below limit")).collect();
+        let held: Vec<_> = (0..MAX_TCP_SESSIONS)
+            .map(|_| tcp_permit(local).expect("permit below limit"))
+            .collect();
         assert!(tcp_permit(local).is_none());
         drop(held);
         assert_eq!(TCP_SESSIONS.load(Ordering::Relaxed), 0);
@@ -1229,9 +1583,14 @@ mod tests {
 
         // One LAN host: its own share only, and the Mac still gets in.
         let lan: IpAddr = "192.168.2.50".parse().unwrap();
-        let flood: Vec<_> = (0..MAX_PEER_SESSIONS).map(|_| tcp_permit(lan).expect("below the peer limit")).collect();
+        let flood: Vec<_> = (0..MAX_PEER_SESSIONS)
+            .map(|_| tcp_permit(lan).expect("below the peer limit"))
+            .collect();
         assert!(tcp_permit(lan).is_none());
-        assert!(tcp_permit("::ffff:192.168.2.50".parse().unwrap()).is_none(), "a v4-mapped address is the same peer");
+        assert!(
+            tcp_permit("::ffff:192.168.2.50".parse().unwrap()).is_none(),
+            "a v4-mapped address is the same peer"
+        );
         assert!(tcp_permit("192.168.2.51".parse().unwrap()).is_some());
         assert!(tcp_permit(local).is_some());
         assert!(tcp_permit("::1".parse().unwrap()).is_some());
@@ -1241,7 +1600,9 @@ mod tests {
             .collect();
         assert_eq!(flood.len() + many.len(), MAX_REMOTE_SESSIONS);
         assert!(tcp_permit("10.9.9.9".parse().unwrap()).is_none());
-        let mac: Vec<_> = (0..MAX_TCP_SESSIONS - MAX_REMOTE_SESSIONS).map(|_| tcp_permit(local).expect("the Mac's share")).collect();
+        let mac: Vec<_> = (0..MAX_TCP_SESSIONS - MAX_REMOTE_SESSIONS)
+            .map(|_| tcp_permit(local).expect("the Mac's share"))
+            .collect();
         assert!(tcp_permit(local).is_none());
         drop((flood, many, mac));
         assert_eq!(TCP_SESSIONS.load(Ordering::Relaxed), 0);
@@ -1267,8 +1628,14 @@ mod tests {
         // A second later, `NAT_RATE` more; never more than the burst.
         let later = |secs| t0 + Duration::from_secs(secs);
         assert_eq!(drain(Some(state), later(1)).0, super::NAT_RATE as usize);
-        assert_eq!(super::take_budget(None, later(3600)).0 .0, super::NAT_BURST - 1.0);
-        assert_eq!(super::take_budget(Some(state), later(3600)).0 .0, super::NAT_BURST - 1.0);
+        assert_eq!(
+            super::take_budget(None, later(3600)).0.0,
+            super::NAT_BURST - 1.0
+        );
+        assert_eq!(
+            super::take_budget(Some(state), later(3600)).0.0,
+            super::NAT_BURST - 1.0
+        );
     }
 
     #[test]
@@ -1281,7 +1648,8 @@ mod tests {
         // Whole, and cut at every byte: frames and lengths split across reads.
         for cut in 0..stream.len() {
             let (mut d, mut out) = (super::Deframer::default(), Vec::new());
-            let ended = d.feed(&stream[..cut], &mut out).unwrap() || d.feed(&stream[cut..], &mut out).unwrap();
+            let ended = d.feed(&stream[..cut], &mut out).unwrap()
+                || d.feed(&stream[cut..], &mut out).unwrap();
             assert!(ended, "cut at {cut}");
             assert_eq!(out, b"HTTP/1.0 200 OK\r\n", "cut at {cut}");
         }

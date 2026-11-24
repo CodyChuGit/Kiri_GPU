@@ -24,11 +24,16 @@ pub fn run(args: &[String]) -> io::Result<()> {
     {
         return machine_shell(name, rest);
     }
-    let distro = distro().ok_or_else(|| io::Error::other("Kiri isn't set up yet. Open Kiri from the Start menu first"))?;
+    let distro = distro().ok_or_else(|| {
+        io::Error::other("Kiri isn't set up yet. Open Kiri from the Start menu first")
+    })?;
     // wsl.exe from System32, never one found in the current folder.
-    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let system =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
     let status = Command::new(system.join("System32").join("wsl.exe"))
-        .args(["-d", &distro, "-u", "root", "-e", "sh", "-c", SCRIPT, "kiri"])
+        .args([
+            "-d", &distro, "-u", "root", "-e", "sh", "-c", SCRIPT, "kiri",
+        ])
         .args(args)
         .status()
         .map_err(|e| io::Error::other(format!("could not run wsl.exe ({e})")))?;
@@ -38,7 +43,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
 /// The distro setup put the engine in (crates/kiri-win/src/setup.rs).
 fn distro() -> Option<String> {
     let dir = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Kiri");
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("setup.json")).ok()?).ok()?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("setup.json")).ok()?).ok()?;
     v["distro"].as_str().map(str::to_owned)
 }
 
@@ -49,13 +55,20 @@ fn distro() -> Option<String> {
 /// WSL, so the shell is root's, in /root.
 fn machine_shell(name: &str, rest: &[String]) -> io::Result<()> {
     use std::io::IsTerminal;
-    let tty = if std::io::stdin().is_terminal() { "-it" } else { "-i" };
-    let mut args: Vec<String> = ["exec", tty, "-u", "root", "-w", "/root", "-e", "HOME=/root"].map(str::to_owned).to_vec();
+    let tty = if std::io::stdin().is_terminal() {
+        "-it"
+    } else {
+        "-i"
+    };
+    let mut args: Vec<String> = ["exec", tty, "-u", "root", "-w", "/root", "-e", "HOME=/root"]
+        .map(str::to_owned)
+        .to_vec();
     args.push(format!("machine-{name}"));
     match rest {
         [dd, cmd @ ..] if dd == "--" && !cmd.is_empty() => args.extend(cmd.iter().cloned()),
         // bash when the distro has it, else its sh.
-        _ => args.extend(["sh", "-c", "exec $(command -v bash || command -v sh) -l"].map(str::to_owned)),
+        _ => args
+            .extend(["sh", "-c", "exec $(command -v bash || command -v sh) -l"].map(str::to_owned)),
     }
     crate::docker::run(&args)
 }

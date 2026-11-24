@@ -27,7 +27,11 @@ const TTL: u32 = 600;
 /// Names every container's /etc/hosts has for the host. They're answered here
 /// too, as Docker Desktop's DNS does, for what reads DNS rather than
 /// /etc/hosts: a kind or k3s node's CoreDNS forwards its pods' lookups here.
-const HOST_NAMES: &[&str] = &["host.docker.internal", "host.kiri.internal", "gateway.docker.internal"];
+const HOST_NAMES: &[&str] = &[
+    "host.docker.internal",
+    "host.kiri.internal",
+    "gateway.docker.internal",
+];
 /// Forwarded queries not answered within this are dropped.
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 /// At most this many forwarded queries in flight (each has its own socket);
@@ -112,7 +116,13 @@ pub struct Dns {
 fn udp_socket() -> io::Result<OwnedFd> {
     // SAFETY: plain socket creation; owned immediately.
     let fd = sys::check(
-        unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) } as _,
+        unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        } as _,
         "dns socket",
     )?;
     // SAFETY: `fd` is fresh and ours.
@@ -145,11 +155,19 @@ fn send_to(fd: RawFd, data: &[u8], to: &libc::sockaddr_in) {
 impl Dns {
     /// Starts answering on a bridge's gateway address (once per bridge).
     pub fn serve(&mut self, bridge: &str, gateway: [u8; 4]) -> io::Result<()> {
-        if self.servers.iter().any(|s| s.container.is_none() && s.bridges.iter().any(|b| b == bridge)) {
+        if self
+            .servers
+            .iter()
+            .any(|s| s.container.is_none() && s.bridges.iter().any(|b| b == bridge))
+        {
             return Ok(());
         }
         let sock = bound(gateway)?;
-        self.servers.push(Server { bridges: vec![bridge.to_owned()], sock, container: None });
+        self.servers.push(Server {
+            bridges: vec![bridge.to_owned()],
+            sock,
+            container: None,
+        });
         Ok(())
     }
 
@@ -157,28 +175,47 @@ impl Dns {
     /// namespace `netns` (lo up) for the names on `bridge`, or adds `bridge`
     /// to the networks its server answers for. `owner` is the address its
     /// `--dns` servers are kept under (`set_upstream`).
-    pub fn serve_in(&mut self, netns: &std::fs::File, pid: i32, owner: [u8; 4], bridge: &str) -> io::Result<()> {
-        if let Some(s) = self.servers.iter_mut().find(|s| s.container.is_some_and(|(p, _)| p == pid)) {
+    pub fn serve_in(
+        &mut self,
+        netns: &std::fs::File,
+        pid: i32,
+        owner: [u8; 4],
+        bridge: &str,
+    ) -> io::Result<()> {
+        if let Some(s) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.container.is_some_and(|(p, _)| p == pid))
+        {
             if !s.bridges.iter().any(|b| b == bridge) {
                 s.bridges.push(bridge.to_owned());
             }
             return Ok(());
         }
         let sock = super::netlink::in_netns(netns, || bound(EMBEDDED))?;
-        self.servers.push(Server { bridges: vec![bridge.to_owned()], sock, container: Some((pid, owner)) });
+        self.servers.push(Server {
+            bridges: vec![bridge.to_owned()],
+            sock,
+            container: Some((pid, owner)),
+        });
         Ok(())
     }
 
     /// Container `pid` left `bridge` (`network disconnect`).
     pub fn leave(&mut self, pid: i32, bridge: &str) {
-        for s in self.servers.iter_mut().filter(|s| s.container.is_some_and(|(p, _)| p == pid)) {
+        for s in self
+            .servers
+            .iter_mut()
+            .filter(|s| s.container.is_some_and(|(p, _)| p == pid))
+        {
             s.bridges.retain(|b| b != bridge);
         }
     }
 
     /// Container `pid` is gone: its 127.0.0.11 server goes.
     pub fn drop_container(&mut self, pid: i32) {
-        self.servers.retain(|s| !s.container.is_some_and(|(p, _)| p == pid));
+        self.servers
+            .retain(|s| !s.container.is_some_and(|(p, _)| p == pid));
         self.forget_pending();
     }
 
@@ -186,10 +223,16 @@ impl Dns {
     /// descriptor never gets another server's answers.
     fn forget_pending(&mut self) {
         let servers = &self.servers;
-        self.pending.retain(|p| servers.iter().any(|s| s.sock.as_raw_fd() == p.server));
+        self.pending
+            .retain(|p| servers.iter().any(|s| s.sock.as_raw_fd() == p.server));
     }
 
-    pub fn register(&mut self, bridge: &str, names: impl Iterator<Item = impl AsRef<str>>, ip: [u8; 4]) {
+    pub fn register(
+        &mut self,
+        bridge: &str,
+        names: impl Iterator<Item = impl AsRef<str>>,
+        ip: [u8; 4],
+    ) {
         let table = self.names.entry(bridge.to_owned()).or_default();
         for n in names {
             let list = table.entry(n.as_ref().to_ascii_lowercase()).or_default();
@@ -200,7 +243,13 @@ impl Dns {
     }
 
     /// The IPv6 address of the container that has `owner` on this network.
-    pub fn register6(&mut self, bridge: &str, names: impl Iterator<Item = impl AsRef<str>>, owner: [u8; 4], ip: [u8; 16]) {
+    pub fn register6(
+        &mut self,
+        bridge: &str,
+        names: impl Iterator<Item = impl AsRef<str>>,
+        owner: [u8; 4],
+        ip: [u8; 16],
+    ) {
         let table = self.names6.entry(bridge.to_owned()).or_default();
         for n in names {
             let list = table.entry(n.as_ref().to_ascii_lowercase()).or_default();
@@ -212,7 +261,8 @@ impl Dns {
 
     /// A removed network's bridge: its server and names go.
     pub fn forget_bridge(&mut self, bridge: &str) {
-        self.servers.retain(|s| s.container.is_some() || !s.bridges.iter().any(|b| b == bridge));
+        self.servers
+            .retain(|s| s.container.is_some() || !s.bridges.iter().any(|b| b == bridge));
         for s in &mut self.servers {
             s.bridges.retain(|b| b != bridge);
         }
@@ -249,7 +299,10 @@ impl Dns {
 
     /// Descriptors to poll: each server's, plus each forwarded query's.
     pub fn fds(&self) -> impl Iterator<Item = RawFd> + '_ {
-        self.servers.iter().map(|s| s.sock.as_raw_fd()).chain(self.pending.iter().map(|p| p.sock.as_raw_fd()))
+        self.servers
+            .iter()
+            .map(|s| s.sock.as_raw_fd())
+            .chain(self.pending.iter().map(|p| p.sock.as_raw_fd()))
     }
 
     pub fn owns(&self, fd: RawFd) -> bool {
@@ -293,7 +346,16 @@ impl Dns {
             let mut from: libc::sockaddr_in = unsafe { std::mem::zeroed() };
             let mut len = std::mem::size_of::<libc::sockaddr_in>() as u32;
             // SAFETY: receiving into buffers we own.
-            let n = unsafe { libc::recvfrom(fd, buf.as_mut_ptr().cast(), buf.len(), 0, (&mut from as *mut libc::sockaddr_in).cast(), &mut len) };
+            let n = unsafe {
+                libc::recvfrom(
+                    fd,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    0,
+                    (&mut from as *mut libc::sockaddr_in).cast(),
+                    &mut len,
+                )
+            };
             if n < 12 {
                 break;
             }
@@ -311,10 +373,15 @@ impl Dns {
         let host = vec![super::net::HOST_ADDR];
         // The first of the server's networks that has the name answers.
         let bridge = self.servers[server].bridges.iter().find(|b| {
-            self.names.get(*b).is_some_and(|t| t.contains_key(&name)) || self.names6.get(*b).is_some_and(|t| t.contains_key(&name))
+            self.names.get(*b).is_some_and(|t| t.contains_key(&name))
+                || self.names6.get(*b).is_some_and(|t| t.contains_key(&name))
         });
-        let addrs = bridge.and_then(|b| self.names.get(b)).and_then(|t| t.get(&name));
-        let addrs6 = bridge.and_then(|b| self.names6.get(b)).and_then(|t| t.get(&name));
+        let addrs = bridge
+            .and_then(|b| self.names.get(b))
+            .and_then(|t| t.get(&name));
+        let addrs6 = bridge
+            .and_then(|b| self.names6.get(b))
+            .and_then(|t| t.get(&name));
         // The host's names answer A with the host's address, and AAAA with
         // no records: the host relay is IPv4 only.
         let addrs = match addrs {
@@ -326,8 +393,16 @@ impl Dns {
         if addrs.is_none() && addrs6.is_none() {
             return None;
         }
-        let a: &[[u8; 4]] = if qtype == 1 || qtype == 255 { addrs.map_or(&[], Vec::as_slice) } else { &[] };
-        let aaaa: &[([u8; 4], [u8; 16])] = if qtype == 28 || qtype == 255 { addrs6.map_or(&[], Vec::as_slice) } else { &[] };
+        let a: &[[u8; 4]] = if qtype == 1 || qtype == 255 {
+            addrs.map_or(&[], Vec::as_slice)
+        } else {
+            &[]
+        };
+        let aaaa: &[([u8; 4], [u8; 16])] = if qtype == 28 || qtype == 255 {
+            addrs6.map_or(&[], Vec::as_slice)
+        } else {
+            &[]
+        };
         let mut r = Vec::with_capacity(end + 16 * a.len() + 28 * aaaa.len());
         r.extend_from_slice(&q[0..2]); // id
         r.extend_from_slice(&[0x81, 0x80]); // response, recursion desired + available
@@ -350,12 +425,23 @@ impl Dns {
         Some(r)
     }
 
-    fn forward(&mut self, server: usize, q: &[u8], client: libc::sockaddr_in, upstream: &[[u8; 4]]) {
+    fn forward(
+        &mut self,
+        server: usize,
+        q: &[u8],
+        client: libc::sockaddr_in,
+        upstream: &[[u8; 4]],
+    ) {
         let now = Instant::now();
-        self.pending.retain(|p| now.duration_since(p.sent) < FORWARD_TIMEOUT);
-        let key = self.servers[server].container.map_or(client.sin_addr.s_addr.to_ne_bytes(), |(_, owner)| owner);
+        self.pending
+            .retain(|p| now.duration_since(p.sent) < FORWARD_TIMEOUT);
+        let key = self.servers[server]
+            .container
+            .map_or(client.sin_addr.s_addr.to_ne_bytes(), |(_, owner)| owner);
         let own = self.clients.get(&key).and_then(|v| v.first()).copied();
-        if self.pending.len() >= MAX_PENDING || self.pending.iter().filter(|p| p.key == key).count() >= MAX_PER_CLIENT {
+        if self.pending.len() >= MAX_PENDING
+            || self.pending.iter().filter(|p| p.key == key).count() >= MAX_PER_CLIENT
+        {
             return;
         }
         let Some((_, _, end)) = parse_question(q) else {
@@ -446,7 +532,10 @@ impl Dns {
             Some(reply) => {
                 let mut msg = reply.to_vec();
                 let p = &self.pending[at];
-                if msg.len() >= 12 && u16::from_be_bytes([msg[0], msg[1]]) == p.our && response_matches(&msg, p) {
+                if msg.len() >= 12
+                    && u16::from_be_bytes([msg[0], msg[1]]) == p.our
+                    && response_matches(&msg, p)
+                {
                     self.answered(at, &mut msg);
                 } else {
                     self.pending.swap_remove(at);
@@ -466,7 +555,8 @@ impl Dns {
         if self.relay_down_until.is_some_and(|t| Instant::now() < t) {
             return None;
         }
-        let Ok(stream) = super::transport::dial_within(kiri_proto::DNS_RELAY_PORT, RELAY_CONNECT) else {
+        let Ok(stream) = super::transport::dial_within(kiri_proto::DNS_RELAY_PORT, RELAY_CONNECT)
+        else {
             self.relay_down_until = Some(Instant::now() + RELAY_BACKOFF);
             return None;
         };
@@ -476,7 +566,9 @@ impl Dns {
         frame.extend_from_slice(msg);
         // A few hundred bytes on a fresh stream: one write, never short.
         // SAFETY: writing a buffer we own to a socket we own.
-        if unsafe { libc::write(stream.as_raw_fd(), frame.as_ptr().cast(), frame.len()) } != frame.len() as isize {
+        if unsafe { libc::write(stream.as_raw_fd(), frame.as_ptr().cast(), frame.len()) }
+            != frame.len() as isize
+        {
             return None;
         }
         sys::set_nonblocking(stream.as_raw_fd()).ok()?;
@@ -501,7 +593,12 @@ impl Dns {
         self.pending
             .iter()
             .filter(|p| p.may_relay)
-            .map(|p| FALLBACK_AFTER.saturating_sub(now.duration_since(p.sent)).as_millis().min(i32::MAX as u128) as i32)
+            .map(|p| {
+                FALLBACK_AFTER
+                    .saturating_sub(now.duration_since(p.sent))
+                    .as_millis()
+                    .min(i32::MAX as u128) as i32
+            })
             .min()
             .unwrap_or(-1)
     }
@@ -514,7 +611,14 @@ fn ask(dest: [u8; 4], msg: &[u8]) -> Option<OwnedFd> {
     let to = sockaddr(dest, 53);
     // Connected, so it only receives datagrams from this resolver.
     // SAFETY: connecting to a valid sockaddr_in.
-    if unsafe { libc::connect(sock.as_raw_fd(), (&to as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) } != 0 {
+    if unsafe {
+        libc::connect(
+            sock.as_raw_fd(),
+            (&to as *const libc::sockaddr_in).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as u32,
+        )
+    } != 0
+    {
         return None;
     }
     // SAFETY: sending a buffer we own on a connected socket.
@@ -536,19 +640,31 @@ fn bound(ip: [u8; 4]) -> io::Result<OwnedFd> {
     let addr = sockaddr(ip, 53);
     // SAFETY: binding to a valid sockaddr_in.
     sys::check(
-        unsafe { libc::bind(sock.as_raw_fd(), (&addr as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) } as _,
+        unsafe {
+            libc::bind(
+                sock.as_raw_fd(),
+                (&addr as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as u32,
+            )
+        } as _,
         "dns bind",
     )?;
     Ok(sock)
 }
 
 fn response_matches(msg: &[u8], pending: &Pending) -> bool {
-    msg.get(2).is_some_and(|flags| flags & 0x80 != 0) && msg.get(12..12 + pending.question.len()).is_some_and(|question| question == pending.question)
+    msg.get(2).is_some_and(|flags| flags & 0x80 != 0)
+        && msg
+            .get(12..12 + pending.question.len())
+            .is_some_and(|question| question == pending.question)
 }
 
 fn random_id() -> Option<u16> {
     let mut bytes = [0u8; 2];
-    std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut bytes).ok()?;
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
     Some(u16::from_ne_bytes(bytes))
 }
 
@@ -587,7 +703,11 @@ mod tests {
     #[test]
     fn host_names_answer_on_every_network() {
         let mut dns = Dns::default();
-        dns.servers.push(Server { bridges: vec!["kiri1".into()], sock: udp_socket().unwrap(), container: None });
+        dns.servers.push(Server {
+            bridges: vec!["kiri1".into()],
+            sock: udp_socket().unwrap(),
+            container: None,
+        });
         let q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04host\x06docker\x08internal\x00\x00\x01\x00\x01";
         let r = dns.answer(0, q).expect("answered, not forwarded");
         assert_eq!(&r[6..8], &[0, 1], "one answer");
@@ -599,21 +719,37 @@ mod tests {
         let r = dns.answer(0, &q6).expect("AAAA answered, not forwarded");
         assert_eq!((r[3] & 0x0f, answers(&r, q6.len()).len()), (0, 0));
         let q = query("gateway.docker.internal", 255);
-        assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()), [(1, super::super::net::HOST_ADDR.to_vec())]);
+        assert_eq!(
+            answers(&dns.answer(0, &q).unwrap(), q.len()),
+            [(1, super::super::net::HOST_ADDR.to_vec())]
+        );
     }
 
     #[test]
     fn a_containers_server_answers_for_each_of_its_networks() {
         let mut dns = Dns::default();
-        dns.servers.push(Server { bridges: vec!["kiri1".into(), "kiri2".into()], sock: udp_socket().unwrap(), container: Some((42, [10, 5, 0, 2])) });
+        dns.servers.push(Server {
+            bridges: vec!["kiri1".into(), "kiri2".into()],
+            sock: udp_socket().unwrap(),
+            container: Some((42, [10, 5, 0, 2])),
+        });
         dns.register("kiri1", ["web"].iter(), [10, 5, 0, 3]);
         dns.register("kiri2", ["db"].iter(), [10, 6, 0, 3]);
         let q = query("db", 1);
-        assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()), [(1, vec![10, 6, 0, 3])]);
+        assert_eq!(
+            answers(&dns.answer(0, &q).unwrap(), q.len()),
+            [(1, vec![10, 6, 0, 3])]
+        );
         let q = query("web", 1);
-        assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()), [(1, vec![10, 5, 0, 3])]);
+        assert_eq!(
+            answers(&dns.answer(0, &q).unwrap(), q.len()),
+            [(1, vec![10, 5, 0, 3])]
+        );
         dns.leave(42, "kiri2");
-        assert!(dns.answer(0, &query("db", 1)).is_none(), "gone with the network");
+        assert!(
+            dns.answer(0, &query("db", 1)).is_none(),
+            "gone with the network"
+        );
         dns.drop_container(42);
         assert!(dns.servers.is_empty());
     }
@@ -624,7 +760,17 @@ mod tests {
         let bind = |ip: [u8; 4], port: u16| {
             let s = udp_socket().unwrap();
             let a = super::sockaddr(ip, port);
-            assert_eq!(unsafe { libc::bind(s.as_raw_fd(), (&a as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) }, 0, "bind");
+            assert_eq!(
+                unsafe {
+                    libc::bind(
+                        s.as_raw_fd(),
+                        (&a as *const libc::sockaddr_in).cast(),
+                        std::mem::size_of::<libc::sockaddr_in>() as u32,
+                    )
+                },
+                0,
+                "bind"
+            );
             s
         };
         let name = |fd: i32| {
@@ -638,7 +784,16 @@ mod tests {
             let mut from: libc::sockaddr_in = unsafe { std::mem::zeroed() };
             let mut len = std::mem::size_of::<libc::sockaddr_in>() as u32;
             for _ in 0..100 {
-                let n = unsafe { libc::recvfrom(fd, buf.as_mut_ptr().cast(), buf.len(), 0, (&mut from as *mut libc::sockaddr_in).cast(), &mut len) };
+                let n = unsafe {
+                    libc::recvfrom(
+                        fd,
+                        buf.as_mut_ptr().cast(),
+                        buf.len(),
+                        0,
+                        (&mut from as *mut libc::sockaddr_in).cast(),
+                        &mut len,
+                    )
+                };
                 if n > 0 {
                     return (buf[..n as usize].to_vec(), from);
                 }
@@ -651,7 +806,11 @@ mod tests {
         let server = bind([127, 0, 0, 3], 0);
         let client = bind([127, 0, 0, 1], 0);
         let mut dns = Dns::default();
-        dns.servers.push(Server { bridges: vec!["kiri1".into()], sock: server, container: None });
+        dns.servers.push(Server {
+            bridges: vec!["kiri1".into()],
+            sock: server,
+            container: None,
+        });
         let server_fd = dns.servers[0].sock.as_raw_fd();
         let to = name(server_fd);
         let mut ports = Vec::new();
@@ -668,13 +827,22 @@ mod tests {
             reply[2] |= 0x80;
             super::send_to(resolver.as_raw_fd(), &reply, &from);
             std::thread::sleep(std::time::Duration::from_millis(20));
-            let fd = dns.pending.iter().find(|p| p.our == u16::from_be_bytes([got[0], got[1]])).expect("in flight").sock.as_raw_fd();
+            let fd = dns
+                .pending
+                .iter()
+                .find(|p| p.our == u16::from_be_bytes([got[0], got[1]]))
+                .expect("in flight")
+                .sock
+                .as_raw_fd();
             dns.on_readable(fd, &[[127, 0, 0, 2]]);
             let (answer, _) = recv(client.as_raw_fd());
             assert_eq!(u16::from_be_bytes([answer[0], answer[1]]), id);
         }
         assert_ne!(ports[0], ports[1], "a fresh source port per query");
-        assert!(dns.pending.is_empty(), "answered queries close their sockets");
+        assert!(
+            dns.pending.is_empty(),
+            "answered queries close their sockets"
+        );
     }
 
     #[test]
@@ -720,16 +888,26 @@ mod tests {
     fn names_answer_a_and_aaaa() {
         let mut dns = Dns::default();
         // A server needs a socket; any UDP socket stands in for the bridge's.
-        dns.servers.push(super::Server { bridges: vec!["kiri1".into()], sock: super::udp_socket().unwrap(), container: None });
+        dns.servers.push(super::Server {
+            bridges: vec!["kiri1".into()],
+            sock: super::udp_socket().unwrap(),
+            container: None,
+        });
         dns.register("kiri1", ["web", "Alias"].iter(), [10, 5, 0, 2]);
         let v6 = [0xfd, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
         dns.register6("kiri1", ["web", "Alias"].iter(), [10, 5, 0, 2], v6);
         dns.register("kiri1", ["old"].iter(), [10, 5, 0, 3]);
 
         let q = query("web", 1);
-        assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()), [(1, vec![10, 5, 0, 2])]);
+        assert_eq!(
+            answers(&dns.answer(0, &q).unwrap(), q.len()),
+            [(1, vec![10, 5, 0, 2])]
+        );
         let q = query("alias", 28);
-        assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()), [(28, v6.to_vec())]);
+        assert_eq!(
+            answers(&dns.answer(0, &q).unwrap(), q.len()),
+            [(28, v6.to_vec())]
+        );
         let q = query("web", 255);
         assert_eq!(answers(&dns.answer(0, &q).unwrap(), q.len()).len(), 2);
         // An IPv4-only container: AAAA is answered, empty (NODATA).
@@ -764,7 +942,11 @@ mod tests {
     #[test]
     fn one_client_cant_take_every_forwarded_slot() {
         let mut dns = Dns::default();
-        dns.servers.push(Server { bridges: vec!["kiri0".into()], sock: udp_socket().unwrap(), container: None });
+        dns.servers.push(Server {
+            bridges: vec!["kiri0".into()],
+            sock: udp_socket().unwrap(),
+            container: None,
+        });
         let client = super::sockaddr([172, 17, 0, 2], 4000);
         for _ in 0..super::MAX_PER_CLIENT {
             let mut p = pending();
@@ -774,20 +956,40 @@ mod tests {
         let q = query("example.com", 1);
         // Loopback as the resolver: sending always works.
         dns.forward(0, &q, client, &[[127, 0, 0, 1]]);
-        assert_eq!(dns.pending.len(), super::MAX_PER_CLIENT, "that container's next lookup waits");
-        dns.forward(0, &q, super::sockaddr([172, 17, 0, 3], 4000), &[[127, 0, 0, 1]]);
-        assert_eq!(dns.pending.len(), super::MAX_PER_CLIENT + 1, "another container's goes out");
+        assert_eq!(
+            dns.pending.len(),
+            super::MAX_PER_CLIENT,
+            "that container's next lookup waits"
+        );
+        dns.forward(
+            0,
+            &q,
+            super::sockaddr([172, 17, 0, 3], 4000),
+            &[[127, 0, 0, 1]],
+        );
+        assert_eq!(
+            dns.pending.len(),
+            super::MAX_PER_CLIENT + 1,
+            "another container's goes out"
+        );
     }
 
     #[test]
     fn a_host_that_didnt_answer_isnt_dialled_again_at_once() {
-        let mut dns = Dns { relay: true, ..Default::default() };
+        let mut dns = Dns {
+            relay: true,
+            ..Default::default()
+        };
         // No host to dial in a test: the first try fails and backs off.
         assert!(dns.relay_stream(b"query").is_none());
         let until = dns.relay_down_until.expect("backing off");
         assert!(until > Instant::now());
         assert!(dns.relay_stream(b"query").is_none());
-        assert_eq!(dns.relay_down_until, Some(until), "not tried again while backing off");
+        assert_eq!(
+            dns.relay_down_until,
+            Some(until),
+            "not tried again while backing off"
+        );
     }
 
     #[test]
@@ -824,13 +1026,31 @@ mod tests {
         use std::net::UdpSocket;
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
-        let std::net::SocketAddr::V4(addr) = client.local_addr().unwrap() else { panic!() };
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let std::net::SocketAddr::V4(addr) = client.local_addr().unwrap() else {
+            panic!()
+        };
         let mut dns = Dns::default();
-        dns.servers.push(Server { bridges: vec!["kiri1".into()], sock: udp_socket().unwrap(), container: None });
+        dns.servers.push(Server {
+            bridges: vec!["kiri1".into()],
+            sock: udp_socket().unwrap(),
+            container: None,
+        });
         let mut fds = [0; 2];
         // SAFETY: `fds` has room for the pair.
-        assert_eq!(unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0, fds.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_STREAM | libc::SOCK_NONBLOCK,
+                    0,
+                    fds.as_mut_ptr(),
+                )
+            },
+            0
+        );
         // SAFETY: fresh descriptors from socketpair.
         let (ours, host) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
         let mut p = pending();
@@ -846,7 +1066,10 @@ mod tests {
         frame.extend_from_slice(&reply);
         let send = |b: &[u8]| {
             // SAFETY: writing a buffer we own to our end of the pair.
-            assert_eq!(unsafe { libc::write(host.as_raw_fd(), b.as_ptr().cast(), b.len()) }, b.len() as isize)
+            assert_eq!(
+                unsafe { libc::write(host.as_raw_fd(), b.as_ptr().cast(), b.len()) },
+                b.len() as isize
+            )
         };
         // Half a reply waits for the rest.
         send(&frame[..5]);

@@ -43,7 +43,14 @@ pub fn listen() -> io::Result<OwnedFd> {
 pub fn accept(listener: &OwnedFd, running: &[(&str, libc::pid_t)], paths: &Paths) {
     loop {
         // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-        let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC) };
+        let fd = unsafe {
+            libc::accept4(
+                listener.as_raw_fd(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_CLOEXEC,
+            )
+        };
         if fd < 0 {
             return;
         }
@@ -51,12 +58,24 @@ pub fn accept(listener: &OwnedFd, running: &[(&str, libc::pid_t)], paths: &Paths
         let sock = unsafe { OwnedFd::from_raw_fd(fd) };
         let mut pair = [0; 2];
         // SAFETY: socketpair fills two descriptors, owned immediately.
-        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, pair.as_mut_ptr()) } != 0 {
-            eprintln!("kiri-init: copy: socketpair: {}", io::Error::last_os_error());
+        if unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                pair.as_mut_ptr(),
+            )
+        } != 0
+        {
+            eprintln!(
+                "kiri-init: copy: socketpair: {}",
+                io::Error::last_os_error()
+            );
             continue;
         }
         // SAFETY: fresh descriptors from socketpair.
-        let (ours, theirs) = unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) };
+        let (ours, theirs) =
+            unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) };
         // SAFETY: the agent is single-threaded, so the child is a consistent
         // copy. The child only uses what it inherited, then exits.
         match unsafe { libc::fork() } {
@@ -77,7 +96,14 @@ pub fn accept(listener: &OwnedFd, running: &[(&str, libc::pid_t)], paths: &Paths
             // any other and then calls `exited`.
             pid => {
                 drop((sock, theirs));
-                CHILDREN.with_borrow_mut(|c| c.push(Child { pid, chan: ours, asked: false, root: None }));
+                CHILDREN.with_borrow_mut(|c| {
+                    c.push(Child {
+                        pid,
+                        chan: ours,
+                        asked: false,
+                        root: None,
+                    })
+                });
             }
         }
     }
@@ -88,7 +114,11 @@ pub fn accept(listener: &OwnedFd, running: &[(&str, libc::pid_t)], paths: &Paths
 pub fn interest(fds: &mut Vec<libc::pollfd>) {
     CHILDREN.with_borrow(|c| {
         for ch in c.iter().filter(|ch| !ch.asked) {
-            fds.push(libc::pollfd { fd: ch.chan.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+            fds.push(libc::pollfd {
+                fd: ch.chan.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
         }
     });
 }
@@ -100,11 +130,18 @@ pub fn interest(fds: &mut Vec<libc::pollfd>) {
 /// The answer is `+`, or `-` and why not.
 pub fn on_readable(fd: i32, paths: &Paths) -> bool {
     CHILDREN.with_borrow_mut(|c| {
-        let Some(ch) = c.iter_mut().find(|ch| ch.chan.as_raw_fd() == fd) else { return false };
+        let Some(ch) = c.iter_mut().find(|ch| ch.chan.as_raw_fd() == fd) else {
+            return false;
+        };
         let mut buf = vec![0u8; 64 << 10];
         // SAFETY: receiving into a buffer we own from a descriptor we own.
         let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), libc::MSG_DONTWAIT) };
-        if n < 0 && matches!(io::Error::last_os_error().raw_os_error(), Some(libc::EAGAIN | libc::EINTR)) {
+        if n < 0
+            && matches!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::EAGAIN | libc::EINTR)
+            )
+        {
             return true;
         }
         ch.asked = true;
@@ -120,7 +157,10 @@ pub fn on_readable(fd: i32, paths: &Paths) -> bool {
         let got = match kind {
             "m" => super::roots::acquire(paths, id, &layers),
             "h" => super::roots::hold(paths, id),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown request")),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown request",
+            )),
         };
         let answer = match got {
             Ok(root) => {
@@ -153,15 +193,26 @@ pub fn stop_all() {
 
 /// A reaped child: if it was a copy, the root it held is let go.
 pub fn exited(pid: libc::pid_t) {
-    let gone = CHILDREN.with_borrow_mut(|c| c.iter().position(|ch| ch.pid == pid).map(|i| c.swap_remove(i)));
-    if let Some(Child { root: Some(root), .. }) = gone
+    let gone = CHILDREN.with_borrow_mut(|c| {
+        c.iter()
+            .position(|ch| ch.pid == pid)
+            .map(|i| c.swap_remove(i))
+    });
+    if let Some(Child {
+        root: Some(root), ..
+    }) = gone
         && let Some(base) = root.parent()
     {
         super::roots::release(base);
     }
 }
 
-fn job(sock: OwnedFd, chan: OwnedFd, running: &[(&str, libc::pid_t)], paths: &Paths) -> io::Result<()> {
+fn job(
+    sock: OwnedFd,
+    chan: OwnedFd,
+    running: &[(&str, libc::pid_t)],
+    paths: &Paths,
+) -> io::Result<()> {
     // Only the connection, the socket to the agent and the console stay
     // open: the child must not hold the agent's pipes, which would keep
     // containers' stdin from closing.
@@ -174,7 +225,12 @@ fn job(sock: OwnedFd, chan: OwnedFd, running: &[(&str, libc::pid_t)], paths: &Pa
     unsafe {
         for (first, last) in [(3, lo - 1), (lo + 1, hi - 1), (hi + 1, libc::c_int::MAX)] {
             if first <= last {
-                libc::syscall(libc::SYS_close_range, first as libc::c_uint, last as libc::c_uint, 0);
+                libc::syscall(
+                    libc::SYS_close_range,
+                    first as libc::c_uint,
+                    last as libc::c_uint,
+                    0,
+                );
             }
         }
     }
@@ -183,7 +239,12 @@ fn job(sock: OwnedFd, chan: OwnedFd, running: &[(&str, libc::pid_t)], paths: &Pa
     read_frame(&mut conn, &mut frame)?;
     let spec = match kiri_proto::decode(&frame) {
         Ok(Msg::Copy(c)) => c,
-        Ok(other) => return reply_error(&mut conn, &format!("expected a copy request, got {other:?}")),
+        Ok(other) => {
+            return reply_error(
+                &mut conn,
+                &format!("expected a copy request, got {other:?}"),
+            );
+        }
         Err(e) => return reply_error(&mut conn, &format!("bad frame: {e:?}")),
     };
     let result = match spec.op {
@@ -197,7 +258,10 @@ fn job(sock: OwnedFd, chan: OwnedFd, running: &[(&str, libc::pid_t)], paths: &Pa
                 copy_op::IN => copy_in(&mut conn, &spec),
                 copy_op::OUT | copy_op::STAT => copy_out(&mut conn, &spec),
                 copy_op::EXPORT => export(&mut conn),
-                op => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown copy op {op}"))),
+                op => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown copy op {op}"),
+                )),
             }
         }
     };
@@ -208,7 +272,12 @@ fn job(sock: OwnedFd, chan: OwnedFd, running: &[(&str, libc::pid_t)], paths: &Pa
 }
 
 /// Makes the container's root this process's `/`.
-fn enter(spec: &CopySpec<'_>, running: &[(&str, libc::pid_t)], paths: &Paths, chan: &OwnedFd) -> io::Result<()> {
+fn enter(
+    spec: &CopySpec<'_>,
+    running: &[(&str, libc::pid_t)],
+    paths: &Paths,
+    chan: &OwnedFd,
+) -> io::Result<()> {
     let root = match running.iter().find(|(id, _)| *id == spec.id) {
         // An export is the container's own filesystem, without its mounts:
         // the overlay the agent mounted for it.
@@ -216,7 +285,10 @@ fn enter(spec: &CopySpec<'_>, running: &[(&str, libc::pid_t)], paths: &Paths, ch
         Some(_) if spec.op == copy_op::EXPORT => {
             if ask(chan, 'h', spec).is_err() {
                 if spec.layers.is_empty() {
-                    return Err(io::Error::new(io::ErrorKind::NotFound, "the container stopped"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the container stopped",
+                    ));
                 }
                 ask(chan, 'm', spec)?;
             }
@@ -259,7 +331,17 @@ fn ask(chan: &OwnedFd, kind: char, spec: &CopySpec<'_>) -> io::Result<()> {
         }
     }
     // SAFETY: sending from a buffer we own on a descriptor we own.
-    sys::check(unsafe { libc::send(chan.as_raw_fd(), ask.as_ptr().cast(), ask.len(), libc::MSG_NOSIGNAL) } as _, "ask for the root")?;
+    sys::check(
+        unsafe {
+            libc::send(
+                chan.as_raw_fd(),
+                ask.as_ptr().cast(),
+                ask.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        } as _,
+        "ask for the root",
+    )?;
     let mut buf = [0u8; 4096];
     // SAFETY: receiving into a buffer we own from a descriptor we own.
     let n = unsafe { libc::recv(chan.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
@@ -275,10 +357,27 @@ fn copy_in(conn: &mut fs::File, spec: &CopySpec<'_>) -> io::Result<()> {
     let dest = std::path::Path::new(spec.path);
     match fs::metadata(dest) {
         Ok(m) if m.is_dir() => {}
-        Ok(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("notdir: extraction point is not a directory: {}", spec.path))),
-        Err(_) => return Err(io::Error::new(io::ErrorKind::NotFound, format!("notfound: Could not find the file {} in container {}", spec.path, spec.id))),
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("notdir: extraction point is not a directory: {}", spec.path),
+            ));
+        }
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "notfound: Could not find the file {} in container {}",
+                    spec.path, spec.id
+                ),
+            ));
+        }
     }
-    let source: Box<dyn Read + '_> = if spec.flags & copy_flags::CHUNKED != 0 { Box::new(Chunks::new(&mut *conn)) } else { Box::new(&mut *conn) };
+    let source: Box<dyn Read + '_> = if spec.flags & copy_flags::CHUNKED != 0 {
+        Box::new(Chunks::new(&mut *conn))
+    } else {
+        Box::new(&mut *conn)
+    };
     let mut reader = BufReader::with_capacity(256 * 1024, source);
     {
         let mut archive = tar::Archive::new(&mut reader);
@@ -295,7 +394,20 @@ fn copy_in(conn: &mut fs::File, spec: &CopySpec<'_>) -> io::Result<()> {
                     if m.is_dir() != entry.header().entry_type().is_dir() {
                         return Err(io::Error::new(
                             io::ErrorKind::AlreadyExists,
-                            format!("cannot overwrite {} {} with {}", if m.is_dir() { "directory" } else { "non-directory" }, target.display(), if m.is_dir() { "non-directory" } else { "directory" }),
+                            format!(
+                                "cannot overwrite {} {} with {}",
+                                if m.is_dir() {
+                                    "directory"
+                                } else {
+                                    "non-directory"
+                                },
+                                target.display(),
+                                if m.is_dir() {
+                                    "non-directory"
+                                } else {
+                                    "directory"
+                                }
+                            ),
                         ));
                     }
                 }
@@ -322,7 +434,11 @@ struct Chunks<R> {
 
 impl<R: Read> Chunks<R> {
     fn new(inner: R) -> Self {
-        Chunks { inner, left: 0, done: false }
+        Chunks {
+            inner,
+            left: 0,
+            done: false,
+        }
     }
 }
 
@@ -340,7 +456,10 @@ impl<R: Read> Read for Chunks<R> {
         let want = buf.len().min(self.left as usize);
         let n = self.inner.read(&mut buf[..want])?;
         if n == 0 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the archive ended inside a chunk"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the archive ended inside a chunk",
+            ));
         }
         self.left -= n as u32;
         Ok(n)
@@ -350,10 +469,23 @@ impl<R: Read> Read for Chunks<R> {
 /// Answers with the path's metadata; for `OUT` an archive of it follows.
 fn copy_out(conn: &mut fs::File, spec: &CopySpec<'_>) -> io::Result<()> {
     let path = std::path::Path::new(spec.path);
-    let meta = fs::symlink_metadata(path)
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, format!("notfound: Could not find the file {} in container {}", spec.path, spec.id)))?;
-    let link = if meta.file_type().is_symlink() { fs::read_link(path)?.to_string_lossy().into_owned() } else { String::new() };
-    let name = path.file_name().map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned());
+    let meta = fs::symlink_metadata(path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "notfound: Could not find the file {} in container {}",
+                spec.path, spec.id
+            ),
+        )
+    })?;
+    let link = if meta.file_type().is_symlink() {
+        fs::read_link(path)?.to_string_lossy().into_owned()
+    } else {
+        String::new()
+    };
+    let name = path
+        .file_name()
+        .map_or_else(|| "/".to_owned(), |n| n.to_string_lossy().into_owned());
     let entry = FsEntry {
         name: &name,
         mode: meta.mode(),
@@ -386,12 +518,19 @@ fn copy_out(conn: &mut fs::File, spec: &CopySpec<'_>) -> io::Result<()> {
 
 /// Like `append_dir_all`, but sockets (which tar cannot hold) are skipped,
 /// and the kernel's /proc and /sys archive as empty directories.
-fn append_tree(b: &mut tar::Builder<impl Write>, src: &std::path::Path, name: &std::path::Path) -> io::Result<()> {
+fn append_tree(
+    b: &mut tar::Builder<impl Write>,
+    src: &std::path::Path,
+    name: &std::path::Path,
+) -> io::Result<()> {
     let mut stack = vec![(src.to_path_buf(), name.to_path_buf())];
     while let Some((src, name)) = stack.pop() {
         let meta = fs::symlink_metadata(&src)?;
         append_one(b, &src, &name, &meta)?;
-        if meta.is_dir() && src != std::path::Path::new("/proc") && src != std::path::Path::new("/sys") {
+        if meta.is_dir()
+            && src != std::path::Path::new("/proc")
+            && src != std::path::Path::new("/sys")
+        {
             let mut children: Vec<_> = fs::read_dir(&src)?.flatten().collect();
             children.sort_by_key(|e| e.file_name());
             for e in children.into_iter().rev() {
@@ -402,7 +541,12 @@ fn append_tree(b: &mut tar::Builder<impl Write>, src: &std::path::Path, name: &s
     Ok(())
 }
 
-fn append_one(b: &mut tar::Builder<impl Write>, src: &std::path::Path, name: &std::path::Path, meta: &fs::Metadata) -> io::Result<()> {
+fn append_one(
+    b: &mut tar::Builder<impl Write>,
+    src: &std::path::Path,
+    name: &std::path::Path,
+    meta: &fs::Metadata,
+) -> io::Result<()> {
     let ft = meta.file_type();
     if ft.is_socket() {
         return Ok(());
@@ -413,7 +557,8 @@ fn append_one(b: &mut tar::Builder<impl Write>, src: &std::path::Path, name: &st
         let mut f = fs::File::open(src)?;
         return b.append_data(&mut h, name, &mut f);
     }
-    if ft.is_dir() || ft.is_symlink() || ft.is_fifo() || ft.is_char_device() || ft.is_block_device() {
+    if ft.is_dir() || ft.is_symlink() || ft.is_fifo() || ft.is_char_device() || ft.is_block_device()
+    {
         let mut h = tar::Header::new_gnu();
         h.set_metadata(meta);
         h.set_size(0);
@@ -463,7 +608,14 @@ fn is_opaque(path: &std::path::Path) -> bool {
     let Ok(c) = sys::cstr(path) else { return false };
     let mut v = [0u8; 2];
     // SAFETY: valid path and name; reads at most 2 bytes into `v`.
-    let n = unsafe { libc::lgetxattr(c.as_ptr(), c"trusted.overlay.opaque".as_ptr(), v.as_mut_ptr().cast(), v.len()) };
+    let n = unsafe {
+        libc::lgetxattr(
+            c.as_ptr(),
+            c"trusted.overlay.opaque".as_ptr(),
+            v.as_mut_ptr().cast(),
+            v.len(),
+        )
+    };
     n == 1 && v[0] == b'y'
 }
 
@@ -481,7 +633,12 @@ fn layer_job(conn: &mut fs::File, spec: &CopySpec<'_>, paths: &Paths) -> io::Res
         .filter_map(|d| {
             let c = sys::cstr(&d).ok()?;
             // SAFETY: plain open of a directory; owned right away.
-            let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+            let fd = unsafe {
+                libc::open(
+                    c.as_ptr(),
+                    libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
             // SAFETY: a fresh descriptor when non-negative.
             (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
         })
@@ -502,12 +659,16 @@ fn layer_job(conn: &mut fs::File, spec: &CopySpec<'_>, paths: &Paths) -> io::Res
     let mut stack = vec![std::path::PathBuf::new()];
     while let Some(rel) = stack.pop() {
         let dir = upper.join(&rel);
-        let Ok(list) = fs::read_dir(&dir) else { continue };
+        let Ok(list) = fs::read_dir(&dir) else {
+            continue;
+        };
         let mut names: Vec<_> = list.flatten().collect();
         names.sort_by_key(|e| e.file_name());
         for e in names.into_iter().rev() {
             let r = rel.join(e.file_name());
-            let Ok(m) = fs::symlink_metadata(e.path()) else { continue };
+            let Ok(m) = fs::symlink_metadata(e.path()) else {
+                continue;
+            };
             if m.is_dir() {
                 stack.push(r.clone());
             }
@@ -520,7 +681,11 @@ fn layer_job(conn: &mut fs::File, spec: &CopySpec<'_>, paths: &Paths) -> io::Res
         let in_lower = |rel: &std::path::Path| {
             for l in &lowers {
                 let Some(rel) = rel.to_str() else { continue };
-                let Ok(fd) = super::fsview::open_in(l.as_raw_fd(), rel, libc::O_PATH | libc::O_NOFOLLOW) else { continue };
+                let Ok(fd) =
+                    super::fsview::open_in(l.as_raw_fd(), rel, libc::O_PATH | libc::O_NOFOLLOW)
+                else {
+                    continue;
+                };
                 // SAFETY: fstat into a zeroed stat on a descriptor we own.
                 let mut st: libc::stat = unsafe { std::mem::zeroed() };
                 if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
@@ -558,7 +723,12 @@ fn layer_job(conn: &mut fs::File, spec: &CopySpec<'_>, paths: &Paths) -> io::Res
         };
         for (rel, m) in &entries {
             if is_whiteout(m) {
-                let name = format!(".wh.{}", rel.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+                let name = format!(
+                    ".wh.{}",
+                    rel.file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default()
+                );
                 empty(&mut b, rel.with_file_name(name))?;
                 continue;
             }
@@ -581,7 +751,8 @@ fn reply_error(conn: &mut fs::File, msg: &str) -> io::Result<()> {
 fn read_frame(conn: &mut impl Read, buf: &mut Vec<u8>) -> io::Result<()> {
     buf.resize(4, 0);
     conn.read_exact(&mut buf[..4])?;
-    let len = kiri_proto::frame_len(buf[..4].try_into().expect("4 bytes")).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+    let len = kiri_proto::frame_len(buf[..4].try_into().expect("4 bytes"))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
     buf.resize(len, 0);
     conn.read_exact(&mut buf[4..])
 }
@@ -592,7 +763,15 @@ mod tests {
 
     #[test]
     fn chunks_end_at_the_empty_chunk_and_leave_the_rest() {
-        let wire = [&3u32.to_le_bytes()[..], b"abc", &2u32.to_le_bytes(), b"de", &0u32.to_le_bytes(), b"after"].concat();
+        let wire = [
+            &3u32.to_le_bytes()[..],
+            b"abc",
+            &2u32.to_le_bytes(),
+            b"de",
+            &0u32.to_le_bytes(),
+            b"after",
+        ]
+        .concat();
         let mut conn = &wire[..];
         let mut got = Vec::new();
         Chunks::new(&mut conn).read_to_end(&mut got).unwrap();
@@ -603,7 +782,9 @@ mod tests {
     #[test]
     fn chunks_cut_short_are_an_error() {
         let wire = [&5u32.to_le_bytes()[..], b"ab"].concat();
-        let err = Chunks::new(&wire[..]).read_to_end(&mut Vec::new()).unwrap_err();
+        let err = Chunks::new(&wire[..])
+            .read_to_end(&mut Vec::new())
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 }

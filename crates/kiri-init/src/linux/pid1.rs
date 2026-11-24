@@ -11,15 +11,29 @@ use super::sys::child_fail;
 
 /// Signals left to their default action in PID 1: the ones raised by its
 /// own faults, and terminal job control.
-const NOT_FORWARDED: [libc::c_int; 9] =
-    [libc::SIGFPE, libc::SIGILL, libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGTRAP, libc::SIGSYS, libc::SIGTTIN, libc::SIGTTOU];
+const NOT_FORWARDED: [libc::c_int; 9] = [
+    libc::SIGFPE,
+    libc::SIGILL,
+    libc::SIGSEGV,
+    libc::SIGBUS,
+    libc::SIGABRT,
+    libc::SIGTRAP,
+    libc::SIGSYS,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+];
 
 /// Runs `exe` as PID 1's child and supervises it. Called by the container's
 /// first process in place of its exec, after everything else is set up
 /// (user, capabilities, seccomp), so both run with the same rights.
 /// `tty`: the program gets its own process group and the terminal's
 /// foreground, so ^C reaches it once, not through PID 1 as well.
-pub fn run(exe: &CStr, argv: *const *const libc::c_char, envp: *const *const libc::c_char, tty: bool) -> ! {
+pub fn run(
+    exe: &CStr,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+    tty: bool,
+) -> ! {
     // SAFETY: signal-mask and process calls on local sets, in the
     // single-threaded child; the child branch only execs or exits.
     unsafe {
@@ -71,7 +85,10 @@ pub fn run(exe: &CStr, argv: *const *const libc::c_char, envp: *const *const lib
         // The agent's descriptors (DNS sockets, other containers' pipes) stay out of PID 1.
         libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
 
-        let wake = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        let wake = libc::timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
         loop {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             let sig = libc::sigtimedwait(&forward, &mut info, &wake);

@@ -88,7 +88,12 @@ struct Prog {
 }
 
 const fn stmt(code: u16, k: u32) -> Insn {
-    Insn { code, jt: 0, jf: 0, k }
+    Insn {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
 }
 
 const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> Insn {
@@ -248,7 +253,11 @@ fn deny_vsock(p: &mut Vec<Insn>) {
 /// socket operation makes a socket without the syscall a filter sees.
 fn boundary() -> Vec<Insn> {
     let mut p = head();
-    for nr in [libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register] {
+    for nr in [
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ] {
         deny(&mut p, nr);
     }
     deny_vsock(&mut p);
@@ -290,13 +299,21 @@ const MAX_INSNS: usize = 4096;
 /// that is empty, ragged or longer than the kernel takes is an error.
 fn decode(bytes: &[u8]) -> io::Result<Vec<Insn>> {
     if bytes.is_empty() || !bytes.len().is_multiple_of(8) || bytes.len() / 8 > MAX_INSNS {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("a seccomp program of {} bytes", bytes.len())));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("a seccomp program of {} bytes", bytes.len()),
+        ));
     }
     Ok(bytes
         .as_chunks::<8>()
         .0
         .iter()
-        .map(|c| Insn { code: u16::from_le_bytes([c[0], c[1]]), jt: c[2], jf: c[3], k: u32::from_le_bytes([c[4], c[5], c[6], c[7]]) })
+        .map(|c| Insn {
+            code: u16::from_le_bytes([c[0], c[1]]),
+            jt: c[2],
+            jf: c[3],
+            k: u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+        })
         .collect())
 }
 
@@ -339,9 +356,19 @@ pub fn install_late(program: &[u8]) -> io::Result<()> {
 }
 
 fn set_filter(insns: &[Insn]) -> io::Result<()> {
-    let prog = Prog { len: insns.len() as u16, filter: insns.as_ptr() };
+    let prog = Prog {
+        len: insns.len() as u16,
+        filter: insns.as_ptr(),
+    };
     // SAFETY: a valid sock_fprog whose instructions outlive the call.
-    let ret = unsafe { libc::syscall(libc::SYS_seccomp, 1 /* SECCOMP_SET_MODE_FILTER */, SECCOMP_FILTER_FLAG_SPEC_ALLOW, &prog as *const Prog) };
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            1, /* SECCOMP_SET_MODE_FILTER */
+            SECCOMP_FILTER_FLAG_SPEC_ALLOW,
+            &prog as *const Prog,
+        )
+    };
     if ret != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -372,10 +399,19 @@ mod tests {
     fn vsock_sockets_are_refused_for_everyone() {
         for p in [program(0), program(u64::MAX), boundary()] {
             // socket(AF_VSOCK, …): the number, then arg0, then EAFNOSUPPORT.
-            let at = p.iter().position(|i| i.code == JEQ_K && i.k == libc::SYS_socket as u32).expect("a socket rule");
+            let at = p
+                .iter()
+                .position(|i| i.code == JEQ_K && i.k == libc::SYS_socket as u32)
+                .expect("a socket rule");
             assert_eq!((p[at + 1].code, p[at + 1].k), (LD_W_ABS, OFF_ARG0));
-            assert_eq!((p[at + 2].code, p[at + 2].k, p[at + 2].jf), (JEQ_K, libc::AF_VSOCK as u32, 1));
-            assert_eq!((p[at + 3].code, p[at + 3].k), (RET_K, RET_ERRNO | libc::EAFNOSUPPORT as u32));
+            assert_eq!(
+                (p[at + 2].code, p[at + 2].k, p[at + 2].jf),
+                (JEQ_K, libc::AF_VSOCK as u32, 1)
+            );
+            assert_eq!(
+                (p[at + 3].code, p[at + 3].k),
+                (RET_K, RET_ERRNO | libc::EAFNOSUPPORT as u32)
+            );
             // Other sockets fall through with the syscall number reloaded.
             assert_eq!((p[at + 4].code, p[at + 4].k), (LD_W_ABS, OFF_NR));
             assert_eq!(p[at].jf as usize, 4);
@@ -385,15 +421,34 @@ mod tests {
     #[test]
     fn boundary_keeps_only_the_host_boundary() {
         let p = boundary();
-        let denies = |nr: libc::c_long| p.windows(2).any(|w| w[0].code == JEQ_K && w[0].k == nr as u32 && w[1].k == RET_ERRNO | libc::EPERM as u32);
-        for nr in [libc::SYS_io_uring_setup, libc::SYS_io_uring_enter, libc::SYS_io_uring_register] {
+        let denies = |nr: libc::c_long| {
+            p.windows(2).any(|w| {
+                w[0].code == JEQ_K
+                    && w[0].k == nr as u32
+                    && w[1].k == RET_ERRNO | libc::EPERM as u32
+            })
+        };
+        for nr in [
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
+        ] {
             assert!(denies(nr), "io_uring makes sockets the filter cannot see");
         }
         // Nothing of the default profile: mounts, namespaces, keyrings pass.
-        for nr in [libc::SYS_mount, libc::SYS_unshare, libc::SYS_keyctl, libc::SYS_clone3] {
+        for nr in [
+            libc::SYS_mount,
+            libc::SYS_unshare,
+            libc::SYS_keyctl,
+            libc::SYS_clone3,
+        ] {
             assert!(!denies(nr), "{nr} filtered");
         }
-        assert!(!p.windows(2).any(|w| w[1].k == RET_ERRNO | libc::ENOSYS as u32), "clone3 left alone");
+        assert!(
+            !p.windows(2)
+                .any(|w| w[1].k == RET_ERRNO | libc::ENOSYS as u32),
+            "clone3 left alone"
+        );
         for (i, insn) in p.iter().enumerate() {
             if insn.code == JEQ_K || insn.code == JSET_K {
                 assert!(i + 1 + (insn.jt.max(insn.jf) as usize) < p.len());
@@ -441,9 +496,15 @@ mod tests {
         }
         // The calls after it are still seen with their number.
         assert_eq!(answer(&p, libc::SYS_write as u32, 0), RET_ALLOW);
-        assert_eq!(answer(&p, libc::SYS_mount as u32, 0), RET_ERRNO | libc::EPERM as u32);
+        assert_eq!(
+            answer(&p, libc::SYS_mount as u32, 0),
+            RET_ERRNO | libc::EPERM as u32
+        );
         // Capabilities do not matter for it.
-        assert_eq!(answer(&program(u64::MAX), nr, 0x0004_0000), RET_ERRNO | libc::EPERM as u32);
+        assert_eq!(
+            answer(&program(u64::MAX), nr, 0x0004_0000),
+            RET_ERRNO | libc::EPERM as u32
+        );
     }
 
     #[test]
@@ -466,10 +527,22 @@ mod tests {
             (SYS_SET_MEMPOLICY_HOME_NODE, Some(CAP_SYS_NICE)),
         ];
         for (nr, cap) in calls {
-            assert_eq!(answer(&program(0), nr as u32, 0), eperm, "{nr} denied by default");
+            assert_eq!(
+                answer(&program(0), nr as u32, 0),
+                eperm,
+                "{nr} denied by default"
+            );
             match cap {
-                Some(c) => assert_eq!(answer(&program(1 << c), nr as u32, 0), RET_ALLOW, "{nr} opens with cap {c}"),
-                None => assert_eq!(answer(&program(u64::MAX), nr as u32, 0), eperm, "{nr} has no capability"),
+                Some(c) => assert_eq!(
+                    answer(&program(1 << c), nr as u32, 0),
+                    RET_ALLOW,
+                    "{nr} opens with cap {c}"
+                ),
+                None => assert_eq!(
+                    answer(&program(u64::MAX), nr as u32, 0),
+                    eperm,
+                    "{nr} has no capability"
+                ),
             }
         }
     }
@@ -480,7 +553,10 @@ mod tests {
         let eperm = RET_ERRNO | libc::EPERM as u32;
         for nr in [libc::SYS_ioperm, libc::SYS_iopl] {
             assert_eq!(answer(&program(0), nr as u32, 0), eperm);
-            assert_eq!(answer(&program(1 << CAP_SYS_RAWIO), nr as u32, 0), RET_ALLOW);
+            assert_eq!(
+                answer(&program(1 << CAP_SYS_RAWIO), nr as u32, 0),
+                RET_ALLOW
+            );
         }
     }
 
@@ -496,7 +572,11 @@ mod tests {
         }
         let read = decode(&bytes).unwrap();
         assert_eq!(read.len(), boundary().len());
-        assert!(read.iter().zip(boundary()).all(|(a, b)| (a.code, a.jt, a.jf, a.k) == (b.code, b.jt, b.jf, b.k)));
+        assert!(
+            read.iter()
+                .zip(boundary())
+                .all(|(a, b)| (a.code, a.jt, a.jf, a.k) == (b.code, b.jt, b.jf, b.k))
+        );
         assert!(check(&bytes).is_ok());
     }
 

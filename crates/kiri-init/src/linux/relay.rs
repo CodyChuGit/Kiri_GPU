@@ -43,7 +43,11 @@ struct Pipe {
 
 impl Pipe {
     fn new() -> Pipe {
-        Pipe { buf: Vec::with_capacity(BUF), eof: false, shut: false }
+        Pipe {
+            buf: Vec::with_capacity(BUF),
+            eof: false,
+            shut: false,
+        }
     }
 }
 
@@ -81,13 +85,30 @@ pub fn accept_framed(listener: &OwnedFd) -> Option<Relay> {
 
 pub fn accept(listener: &OwnedFd) -> Option<Relay> {
     // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-    let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) };
+    let fd = unsafe {
+        libc::accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return None;
     }
     // SAFETY: `fd` is a fresh descriptor that nothing else owns.
     let host = unsafe { OwnedFd::from_raw_fd(fd) };
-    Some(Relay { host, target: None, connected: false, header: Vec::with_capacity(6), up: Pipe::new(), down: Pipe::new(), dead: false, udp: false, framed: false })
+    Some(Relay {
+        host,
+        target: None,
+        connected: false,
+        header: Vec::with_capacity(6),
+        up: Pipe::new(),
+        down: Pipe::new(),
+        dead: false,
+        udp: false,
+        framed: false,
+    })
 }
 
 fn read_into(fd: RawFd, buf: &mut Vec<u8>, max: usize) -> io::Result<usize> {
@@ -140,27 +161,56 @@ fn write_from(fd: RawFd, buf: &mut Vec<u8>) -> io::Result<()> {
 }
 
 fn would_block(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINPROGRESS))
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EAGAIN) | Some(libc::EINPROGRESS)
+    )
 }
 
 impl Relay {
     /// (fd, events) pairs to poll for this relay.
     pub fn interest(&self, out: &mut Vec<libc::pollfd>) {
-        let host_ev = if self.target.is_none() || (!self.up.eof && self.up.buf.len() < BUF) { libc::POLLIN } else { 0 }
-            | if self.down.buf.is_empty() { 0 } else { libc::POLLOUT };
-        out.push(libc::pollfd { fd: self.host.as_raw_fd(), events: host_ev, revents: 0 });
+        let host_ev = if self.target.is_none() || (!self.up.eof && self.up.buf.len() < BUF) {
+            libc::POLLIN
+        } else {
+            0
+        } | if self.down.buf.is_empty() {
+            0
+        } else {
+            libc::POLLOUT
+        };
+        out.push(libc::pollfd {
+            fd: self.host.as_raw_fd(),
+            events: host_ev,
+            revents: 0,
+        });
         if let (Some(t), true) = (&self.target, self.udp) {
-            out.push(libc::pollfd { fd: t.as_raw_fd(), events: libc::POLLIN, revents: 0 });
+            out.push(libc::pollfd {
+                fd: t.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
             return;
         }
         if let Some(t) = &self.target {
             let ev = if !self.connected {
                 libc::POLLOUT
             } else {
-                (if !self.down.eof && self.down.buf.len() < BUF { libc::POLLIN } else { 0 })
-                    | if self.up.buf.is_empty() { 0 } else { libc::POLLOUT }
+                (if !self.down.eof && self.down.buf.len() < BUF {
+                    libc::POLLIN
+                } else {
+                    0
+                }) | if self.up.buf.is_empty() {
+                    0
+                } else {
+                    libc::POLLOUT
+                }
             };
-            out.push(libc::pollfd { fd: t.as_raw_fd(), events: ev, revents: 0 });
+            out.push(libc::pollfd {
+                fd: t.as_raw_fd(),
+                events: ev,
+                revents: 0,
+            });
         }
     }
 
@@ -217,7 +267,15 @@ impl Relay {
             let mut err: libc::c_int = 0;
             let mut len = std::mem::size_of::<libc::c_int>() as u32;
             // SAFETY: reading SO_ERROR into a local int.
-            unsafe { libc::getsockopt(target, libc::SOL_SOCKET, libc::SO_ERROR, (&mut err as *mut libc::c_int).cast(), &mut len) };
+            unsafe {
+                libc::getsockopt(
+                    target,
+                    libc::SOL_SOCKET,
+                    libc::SO_ERROR,
+                    (&mut err as *mut libc::c_int).cast(),
+                    &mut len,
+                )
+            };
             if err == libc::EINPROGRESS || err == libc::EALREADY {
                 return Ok(());
             }
@@ -230,7 +288,10 @@ impl Relay {
             // SAFETY: plain getpeername into a local buffer.
             let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
             let mut sl = std::mem::size_of::<libc::sockaddr_in>() as u32;
-            if unsafe { libc::getpeername(target, (&mut sa as *mut libc::sockaddr_in).cast(), &mut sl) } != 0 {
+            if unsafe {
+                libc::getpeername(target, (&mut sa as *mut libc::sockaddr_in).cast(), &mut sl)
+            } != 0
+            {
                 return Ok(());
             }
             self.connected = true;
@@ -246,7 +307,11 @@ impl Relay {
 /// half-close once everything read has been written.
 fn pump(from: RawFd, to: RawFd, pipe: &mut Pipe, framed: bool) -> io::Result<()> {
     if !pipe.eof && pipe.buf.len() < BUF {
-        let read = if framed { read_frame_into(from, &mut pipe.buf, BUF) } else { read_into(from, &mut pipe.buf, BUF) };
+        let read = if framed {
+            read_frame_into(from, &mut pipe.buf, BUF)
+        } else {
+            read_into(from, &mut pipe.buf, BUF)
+        };
         match read {
             Ok(0) => pipe.eof = true,
             Ok(_) => {}
@@ -313,13 +378,27 @@ fn udp_step(host: RawFd, target: RawFd, up: &mut Pipe, down: &mut Pipe) -> io::R
 fn connect_udp(ip: [u8; 4], port: u16) -> io::Result<OwnedFd> {
     // SAFETY: plain socket setup; the fd is owned immediately.
     unsafe {
-        let fd = sys::check(libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "socket")?;
+        let fd = sys::check(
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            ) as _,
+            "socket",
+        )?;
         let sock = OwnedFd::from_raw_fd(fd as RawFd);
         let mut a: libc::sockaddr_in = std::mem::zeroed();
         a.sin_family = libc::AF_INET as libc::sa_family_t;
         a.sin_port = port.to_be();
         a.sin_addr.s_addr = u32::from_ne_bytes(ip);
-        sys::check(libc::connect(sock.as_raw_fd(), (&a as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) as _, "connect")?;
+        sys::check(
+            libc::connect(
+                sock.as_raw_fd(),
+                (&a as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as u32,
+            ) as _,
+            "connect",
+        )?;
         Ok(sock)
     }
 }
@@ -327,15 +406,32 @@ fn connect_udp(ip: [u8; 4], port: u16) -> io::Result<OwnedFd> {
 fn connect(ip: [u8; 4], port: u16) -> io::Result<OwnedFd> {
     // SAFETY: plain non-blocking connect; the fd is owned immediately.
     unsafe {
-        let fd = sys::check(libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "socket")?;
+        let fd = sys::check(
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            ) as _,
+            "socket",
+        )?;
         let sock = OwnedFd::from_raw_fd(fd as RawFd);
         let one: libc::c_int = 1;
-        libc::setsockopt(sock.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_NODELAY, (&one as *const libc::c_int).cast(), 4);
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&one as *const libc::c_int).cast(),
+            4,
+        );
         let mut a: libc::sockaddr_in = std::mem::zeroed();
         a.sin_family = libc::AF_INET as libc::sa_family_t;
         a.sin_port = port.to_be();
         a.sin_addr.s_addr = u32::from_ne_bytes(ip);
-        let r = libc::connect(sock.as_raw_fd(), (&a as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32);
+        let r = libc::connect(
+            sock.as_raw_fd(),
+            (&a as *const libc::sockaddr_in).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as u32,
+        );
         if r != 0 {
             let e = io::Error::last_os_error();
             if e.raw_os_error() != Some(libc::EINPROGRESS) {
@@ -351,14 +447,34 @@ fn connect(ip: [u8; 4], port: u16) -> io::Result<OwnedFd> {
 pub fn listen_host_bound(port: u16) -> io::Result<OwnedFd> {
     // SAFETY: plain socket setup; the fd is owned immediately.
     unsafe {
-        let fd = sys::check(libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "socket")?;
+        let fd = sys::check(
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            ) as _,
+            "socket",
+        )?;
         let sock = OwnedFd::from_raw_fd(fd as RawFd);
         let one: libc::c_int = 1;
-        libc::setsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEADDR, (&one as *const libc::c_int).cast(), 4);
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            (&one as *const libc::c_int).cast(),
+            4,
+        );
         let mut a: libc::sockaddr_in = std::mem::zeroed();
         a.sin_family = libc::AF_INET as libc::sa_family_t;
         a.sin_port = port.to_be();
-        sys::check(libc::bind(sock.as_raw_fd(), (&a as *const libc::sockaddr_in).cast(), std::mem::size_of::<libc::sockaddr_in>() as u32) as _, "bind")?;
+        sys::check(
+            libc::bind(
+                sock.as_raw_fd(),
+                (&a as *const libc::sockaddr_in).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as u32,
+            ) as _,
+            "bind",
+        )?;
         sys::check(libc::listen(sock.as_raw_fd(), 128) as _, "listen")?;
         Ok(sock)
     }
@@ -373,7 +489,14 @@ pub const HOST_VSOCK_PORT: u32 = 1026;
 /// directly (from the LAN, on a Linux host) would reach the host's loopback.
 pub fn accept_host_bound(listener: &OwnedFd, host_addr: [u8; 4]) -> Option<Relay> {
     // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-    let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) };
+    let fd = unsafe {
+        libc::accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return None;
     }
@@ -384,7 +507,14 @@ pub fn accept_host_bound(listener: &OwnedFd, host_addr: [u8; 4]) -> Option<Relay
         let mut dst: libc::sockaddr_in = std::mem::zeroed();
         let mut len = std::mem::size_of::<libc::sockaddr_in>() as u32;
         const SO_ORIGINAL_DST: libc::c_int = 80;
-        if libc::getsockopt(client.as_raw_fd(), libc::SOL_IP, SO_ORIGINAL_DST, (&mut dst as *mut libc::sockaddr_in).cast(), &mut len) != 0 {
+        if libc::getsockopt(
+            client.as_raw_fd(),
+            libc::SOL_IP,
+            SO_ORIGINAL_DST,
+            (&mut dst as *mut libc::sockaddr_in).cast(),
+            &mut len,
+        ) != 0
+        {
             return Some(Relay::dead_one(client));
         }
         if dst.sin_addr.s_addr != u32::from_ne_bytes(host_addr) {
@@ -392,7 +522,9 @@ pub fn accept_host_bound(listener: &OwnedFd, host_addr: [u8; 4]) -> Option<Relay
         }
         u16::from_be(dst.sin_port)
     };
-    let Ok(host) = dial_host(HOST_VSOCK_PORT) else { return Some(Relay::dead_one(client)) };
+    let Ok(host) = dial_host(HOST_VSOCK_PORT) else {
+        return Some(Relay::dead_one(client));
+    };
     // The Mac connects to its own loopback: services bound to 127.0.0.1 work.
     let mut header = [127, 0, 0, 1, 0, 0];
     header[4..].copy_from_slice(&port.to_be_bytes());
@@ -423,7 +555,17 @@ fn dial_host(port: u32) -> io::Result<OwnedFd> {
 impl Relay {
     /// A relay that only exists to close `fd` on the next sweep.
     fn dead_one(fd: OwnedFd) -> Relay {
-        Relay { host: fd, target: None, connected: false, header: Vec::new(), up: Pipe::new(), down: Pipe::new(), dead: true, udp: false, framed: false }
+        Relay {
+            host: fd,
+            target: None,
+            connected: false,
+            header: Vec::new(),
+            up: Pipe::new(),
+            down: Pipe::new(),
+            dead: true,
+            udp: false,
+            framed: false,
+        }
     }
 }
 
@@ -441,15 +583,32 @@ pub fn listen_ssh_agent() -> io::Result<OwnedFd> {
         // host this directory is the host's own, so only root, which
         // bind-mounts the socket into containers, may reach it by path.
         let dir = std::ffi::CString::new("/run/host-services").expect("no NUL");
-        sys::check(libc::chmod(dir.as_ptr(), 0o700) as _, "chmod /run/host-services")?;
-        let fd = sys::check(libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "socket")?;
+        sys::check(
+            libc::chmod(dir.as_ptr(), 0o700) as _,
+            "chmod /run/host-services",
+        )?;
+        let fd = sys::check(
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            ) as _,
+            "socket",
+        )?;
         let sock = OwnedFd::from_raw_fd(fd as RawFd);
         let mut a: libc::sockaddr_un = std::mem::zeroed();
         a.sun_family = libc::AF_UNIX as libc::sa_family_t;
         for (d, s) in a.sun_path.iter_mut().zip(SSH_AGENT_SOCK.bytes()) {
             *d = s as libc::c_char;
         }
-        sys::check(libc::bind(sock.as_raw_fd(), (&a as *const libc::sockaddr_un).cast(), std::mem::size_of::<libc::sockaddr_un>() as u32) as _, "bind")?;
+        sys::check(
+            libc::bind(
+                sock.as_raw_fd(),
+                (&a as *const libc::sockaddr_un).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as u32,
+            ) as _,
+            "bind",
+        )?;
         // Any user in a container may use it, as with Docker Desktop.
         let path = std::ffi::CString::new(SSH_AGENT_SOCK).expect("no NUL");
         libc::chmod(path.as_ptr(), 0o777);
@@ -460,17 +619,36 @@ pub fn listen_ssh_agent() -> io::Result<OwnedFd> {
 
 pub fn accept_ssh_agent(listener: &OwnedFd) -> Option<Relay> {
     // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-    let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) };
+    let fd = unsafe {
+        libc::accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return None;
     }
     // SAFETY: fresh descriptor.
     let client = unsafe { OwnedFd::from_raw_fd(fd) };
-    let Ok(host) = dial_host(SSH_VSOCK_PORT) else { return Some(Relay::dead_one(client)) };
+    let Ok(host) = dial_host(SSH_VSOCK_PORT) else {
+        return Some(Relay::dead_one(client));
+    };
     if sys::set_nonblocking(host.as_raw_fd()).is_err() {
         return Some(Relay::dead_one(client));
     }
-    Some(Relay { host, target: Some(client), connected: true, header: Vec::new(), up: Pipe::new(), down: Pipe::new(), dead: false, udp: false, framed: false })
+    Some(Relay {
+        host,
+        target: Some(client),
+        connected: true,
+        header: Vec::new(),
+        up: Pipe::new(),
+        down: Pipe::new(),
+        dead: false,
+        udp: false,
+        framed: false,
+    })
 }
 
 /// The engine's own API, for containers that mount the docker socket
@@ -486,14 +664,28 @@ pub fn listen_engine() -> io::Result<OwnedFd> {
     let _ = std::fs::remove_file(ENGINE_SOCK);
     // SAFETY: plain unix socket setup; the fd is owned immediately.
     unsafe {
-        let fd = sys::check(libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) as _, "socket")?;
+        let fd = sys::check(
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            ) as _,
+            "socket",
+        )?;
         let sock = OwnedFd::from_raw_fd(fd as RawFd);
         let mut a: libc::sockaddr_un = std::mem::zeroed();
         a.sun_family = libc::AF_UNIX as libc::sa_family_t;
         for (d, s) in a.sun_path.iter_mut().zip(ENGINE_SOCK.bytes()) {
             *d = s as libc::c_char;
         }
-        sys::check(libc::bind(sock.as_raw_fd(), (&a as *const libc::sockaddr_un).cast(), std::mem::size_of::<libc::sockaddr_un>() as u32) as _, "bind")?;
+        sys::check(
+            libc::bind(
+                sock.as_raw_fd(),
+                (&a as *const libc::sockaddr_un).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as u32,
+            ) as _,
+            "bind",
+        )?;
         // root in a container that was given it, as Docker's root:docker 0660.
         let path = std::ffi::CString::new(ENGINE_SOCK).expect("no NUL");
         libc::chmod(path.as_ptr(), 0o660);
@@ -504,17 +696,36 @@ pub fn listen_engine() -> io::Result<OwnedFd> {
 
 pub fn accept_engine(listener: &OwnedFd) -> Option<Relay> {
     // SAFETY: accept4 on a listening socket we own; the fd is owned immediately.
-    let fd = unsafe { libc::accept4(listener.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) };
+    let fd = unsafe {
+        libc::accept4(
+            listener.as_raw_fd(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return None;
     }
     // SAFETY: fresh descriptor.
     let client = unsafe { OwnedFd::from_raw_fd(fd) };
-    let Ok(host) = dial_host(ENGINE_VSOCK_PORT) else { return Some(Relay::dead_one(client)) };
+    let Ok(host) = dial_host(ENGINE_VSOCK_PORT) else {
+        return Some(Relay::dead_one(client));
+    };
     if sys::set_nonblocking(host.as_raw_fd()).is_err() {
         return Some(Relay::dead_one(client));
     }
-    Some(Relay { host, target: Some(client), connected: true, header: Vec::new(), up: Pipe::new(), down: Pipe::new(), dead: false, udp: false, framed: false })
+    Some(Relay {
+        host,
+        target: Some(client),
+        connected: true,
+        header: Vec::new(),
+        up: Pipe::new(),
+        down: Pipe::new(),
+        dead: false,
+        udp: false,
+        framed: false,
+    })
 }
 
 #[cfg(test)]
@@ -529,14 +740,26 @@ mod tests {
         // SAFETY: pipe succeeded, so both are fresh and ours.
         let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
         // SAFETY: writing a local buffer to a pipe we own.
-        assert_eq!(unsafe { libc::write(w.as_raw_fd(), b"abc".as_ptr().cast(), 3) }, 3);
+        assert_eq!(
+            unsafe { libc::write(w.as_raw_fd(), b"abc".as_ptr().cast(), 3) },
+            3
+        );
         drop(w);
         let mut buf = Vec::new();
-        assert_eq!(super::read_frame_into(r.as_raw_fd(), &mut buf, super::BUF).unwrap(), 3);
-        assert_eq!(super::read_frame_into(r.as_raw_fd(), &mut buf, super::BUF).unwrap(), 0);
+        assert_eq!(
+            super::read_frame_into(r.as_raw_fd(), &mut buf, super::BUF).unwrap(),
+            3
+        );
+        assert_eq!(
+            super::read_frame_into(r.as_raw_fd(), &mut buf, super::BUF).unwrap(),
+            0
+        );
         assert_eq!(buf, [0, 0, 0, 3, b'a', b'b', b'c', 0, 0, 0, 0]);
         // No room for a frame: not read, and not taken for EOF.
         let full = buf.len() + 4;
-        assert_eq!(super::read_frame_into(r.as_raw_fd(), &mut buf, full).unwrap(), 1);
+        assert_eq!(
+            super::read_frame_into(r.as_raw_fd(), &mut buf, full).unwrap(),
+            1
+        );
     }
 }

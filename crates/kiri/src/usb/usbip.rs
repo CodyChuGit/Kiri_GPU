@@ -79,15 +79,27 @@ pub struct Done {
 
 impl Done {
     pub fn read(data: Vec<u8>) -> Done {
-        Done { status: 0, actual: data.len(), data }
+        Done {
+            status: 0,
+            actual: data.len(),
+            data,
+        }
     }
 
     pub fn wrote(n: usize) -> Done {
-        Done { status: 0, data: Vec::new(), actual: n }
+        Done {
+            status: 0,
+            data: Vec::new(),
+            actual: n,
+        }
     }
 
     pub fn fail(errno: i32) -> Done {
-        Done { status: -errno.abs(), data: Vec::new(), actual: 0 }
+        Done {
+            status: -errno.abs(),
+            data: Vec::new(),
+            actual: 0,
+        }
     }
 }
 
@@ -119,7 +131,11 @@ struct Urb {
 
 impl Urb {
     fn address(&self) -> u8 {
-        if self.ep == 0 { 0 } else { self.ep | if self.dir_in { 0x80 } else { 0 } }
+        if self.ep == 0 {
+            0
+        } else {
+            self.ep | if self.dir_in { 0x80 } else { 0 }
+        }
     }
 }
 
@@ -142,7 +158,11 @@ struct Session<B: ?Sized> {
 impl<B: Backend + ?Sized> Session<B> {
     fn send(&self, msg: &[u8]) {
         // A closed peer ends the read loop; nothing to do here.
-        let _ = self.out.lock().unwrap_or_else(|e| e.into_inner()).write_all(msg);
+        let _ = self
+            .out
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .write_all(msg);
     }
 
     fn ret_submit(&self, seq: u32, d: &Done) {
@@ -184,7 +204,11 @@ impl<B: Backend + ?Sized> Session<B> {
         } else {
             d.data.clear();
         }
-        let state = self.states.lock().unwrap_or_else(|e| e.into_inner()).remove(&u.seq);
+        let state = self
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&u.seq);
         match state {
             Some(State::Unlinking(unlink_seq)) => self.ret_unlink(unlink_seq, -ECONNRESET),
             _ => self.ret_submit(u.seq, &d),
@@ -197,7 +221,10 @@ impl<B: Backend + ?Sized> Session<B> {
             return b.transfer(u.seq, u.address(), &u.data, u.len);
         }
         let s = Setup::parse(&u.setup);
-        let status = |code: i32| Done { status: code, ..Done::default() };
+        let status = |code: i32| Done {
+            status: code,
+            ..Done::default()
+        };
         match (s.request_type, s.request) {
             (0x00, 9) => status(b.set_configuration(s.value as u8)),
             (0x01, 11) => status(b.set_interface(s.index as u8, s.value as u8)),
@@ -239,8 +266,16 @@ impl<B: Backend + ?Sized> Session<B> {
 /// Serves `backend` on a USB/IP stream until the guest closes it (or the
 /// stream breaks, or the guest breaks the protocol). On the way out the
 /// backend is closed and its endpoint threads are given 2 s to finish.
-pub fn serve<B: Backend + ?Sized>(backend: Arc<B>, mut input: impl Read, output: impl Write + Send + 'static) -> io::Result<()> {
-    let session = Arc::new(Session { backend: backend.clone(), states: Mutex::new(HashMap::new()), out: Mutex::new(Box::new(output)) });
+pub fn serve<B: Backend + ?Sized>(
+    backend: Arc<B>,
+    mut input: impl Read,
+    output: impl Write + Send + 'static,
+) -> io::Result<()> {
+    let session = Arc::new(Session {
+        backend: backend.clone(),
+        states: Mutex::new(HashMap::new()),
+        out: Mutex::new(Box::new(output)),
+    });
     let mut workers: HashMap<u8, Sender<Urb>> = HashMap::new();
     let (finished_tx, finished) = mpsc::channel::<()>();
     let result = read_loop(&session, &mut input, &mut workers, &finished_tx);
@@ -276,8 +311,15 @@ fn read_loop<B: Backend + ?Sized>(
                 let ep = be(16);
                 let len = be(24) as i32;
                 let packets = be(32) as i32;
-                if ep > 15 || len < 0 || len as usize > MAX_TRANSFER || packets as usize > MAX_PACKETS {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad URB: ep {ep}, length {len}, {packets} packets")));
+                if ep > 15
+                    || len < 0
+                    || len as usize > MAX_TRANSFER
+                    || packets as usize > MAX_PACKETS
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("bad URB: ep {ep}, length {len}, {packets} packets"),
+                    ));
                 }
                 let mut setup = [0u8; 8];
                 setup.copy_from_slice(&head[40..48]);
@@ -294,31 +336,53 @@ fn read_loop<B: Backend + ?Sized>(
                     session.ret_submit(seq, &Done::fail(EINVAL));
                     continue;
                 }
-                session.states.lock().unwrap_or_else(|e| e.into_inner()).insert(seq, State::Queued);
-                let urb = Urb { seq, dir_in, ep: ep as u8, len: len as usize, setup, data };
+                session
+                    .states
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(seq, State::Queued);
+                let urb = Urb {
+                    seq,
+                    dir_in,
+                    ep: ep as u8,
+                    len: len as usize,
+                    setup,
+                    data,
+                };
                 let key = urb.address();
                 let tx = workers.entry(key).or_insert_with(|| {
                     let (tx, rx) = mpsc::channel::<Urb>();
                     let s = session.clone();
                     let done = finished.clone();
-                    let spawned = std::thread::Builder::new().name(format!("kiri-usb-ep{key:02x}")).spawn(move || {
-                        for u in rx {
-                            s.run(u);
-                        }
-                        let _ = done.send(());
-                    });
+                    let spawned = std::thread::Builder::new()
+                        .name(format!("kiri-usb-ep{key:02x}"))
+                        .spawn(move || {
+                            for u in rx {
+                                s.run(u);
+                            }
+                            let _ = done.send(());
+                        });
                     if let Err(e) = spawned {
                         eprintln!("kiri usb: no thread for endpoint {key:02x}: {e}");
                     }
                     tx
                 });
                 if tx.send(urb).is_err() {
-                    session.states.lock().unwrap_or_else(|e| e.into_inner()).remove(&seq);
+                    session
+                        .states
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&seq);
                     session.ret_submit(seq, &Done::fail(ESHUTDOWN));
                 }
             }
             CMD_UNLINK => session.unlink(seq, be(20)),
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown USB/IP command {cmd}"))),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unknown USB/IP command {cmd}"),
+                ));
+            }
         }
     }
 }
@@ -326,11 +390,26 @@ fn read_loop<B: Backend + ?Sized>(
 /// Asks the daemon at `socket` to attach a device, then returns the
 /// upgraded connection that carries its USB/IP. `speed` is the kernel's
 /// USB_SPEED_*, `devid` USB/IP's bus << 16 | address.
-pub fn connect(socket: &Path, location: &str, name: &str, speed: u32, devid: u32) -> io::Result<(UnixStream, BufReader<UnixStream>)> {
+pub fn connect(
+    socket: &Path,
+    location: &str,
+    name: &str,
+    speed: u32,
+    devid: u32,
+) -> io::Result<(UnixStream, BufReader<UnixStream>)> {
     let stream = UnixStream::connect(socket)?;
     // Never hold a device on a daemon that doesn't answer.
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '+' }).collect();
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '+'
+            }
+        })
+        .collect();
     write!(
         &stream,
         "POST /kiri/usb?location={location}&name={name}&speed={speed}&devid={devid} HTTP/1.1\r\nHost: kiri\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Length: 0\r\n\r\n"
@@ -338,14 +417,22 @@ pub fn connect(socket: &Path, location: &str, name: &str, speed: u32, devid: u32
     let mut r = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     r.read_line(&mut line)?;
-    let status: u16 = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let status: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mut length = 0usize;
     loop {
         let mut h = String::new();
         if r.read_line(&mut h)? == 0 || h.trim_end().is_empty() {
             break;
         }
-        if let Some(v) = h.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.trim().to_owned()) {
+        if let Some(v) = h
+            .split_once(':')
+            .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+            .map(|(_, v)| v.trim().to_owned())
+        {
             length = v.parse().unwrap_or(0);
         }
     }
@@ -353,8 +440,13 @@ pub fn connect(socket: &Path, location: &str, name: &str, speed: u32, devid: u32
         let mut body = vec![0u8; length.min(64 * 1024)];
         let _ = r.read_exact(&mut body);
         let text = String::from_utf8_lossy(&body);
-        let msg = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["message"].as_str().map(str::to_owned)).unwrap_or_else(|| text.trim().to_owned());
-        return Err(io::Error::other(format!("Kiri did not take the device: {msg}")));
+        let msg = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| text.trim().to_owned());
+        return Err(io::Error::other(format!(
+            "Kiri did not take the device: {msg}"
+        )));
     }
     stream.set_read_timeout(None)?;
     Ok((stream, r))
@@ -384,19 +476,36 @@ mod tests {
 
     impl Backend for Toy {
         fn control(&self, _: u32, s: &Setup, out: &[u8]) -> Done {
-            self.inner.lock().unwrap().calls.push(format!("control {:02x} {:02x} out={}", s.request_type, s.request, out.len()));
-            if s.request_type & 0x80 != 0 { Done::read(vec![s.request_type, s.request, 1, 2, 3, 4, 5, 6, 7, 8]) } else { Done::wrote(out.len()) }
+            self.inner.lock().unwrap().calls.push(format!(
+                "control {:02x} {:02x} out={}",
+                s.request_type,
+                s.request,
+                out.len()
+            ));
+            if s.request_type & 0x80 != 0 {
+                Done::read(vec![s.request_type, s.request, 1, 2, 3, 4, 5, 6, 7, 8])
+            } else {
+                Done::wrote(out.len())
+            }
         }
         fn set_configuration(&self, v: u8) -> i32 {
             self.inner.lock().unwrap().calls.push(format!("config {v}"));
             0
         }
         fn set_interface(&self, i: u8, a: u8) -> i32 {
-            self.inner.lock().unwrap().calls.push(format!("interface {i} {a}"));
+            self.inner
+                .lock()
+                .unwrap()
+                .calls
+                .push(format!("interface {i} {a}"));
             0
         }
         fn clear_halt(&self, ep: u8) -> i32 {
-            self.inner.lock().unwrap().calls.push(format!("clear {ep:02x}"));
+            self.inner
+                .lock()
+                .unwrap()
+                .calls
+                .push(format!("clear {ep:02x}"));
             0
         }
         fn transfer(&self, seq: u32, ep: u8, out: &[u8], len: usize) -> Done {
@@ -443,7 +552,11 @@ mod tests {
         let t = toy.clone();
         let w = a.try_clone().unwrap();
         let server = std::thread::spawn(move || serve(t, a, w));
-        Peer { s: b, toy, server: Some(server) }
+        Peer {
+            s: b,
+            toy,
+            server: Some(server),
+        }
     }
 
     fn header(words: [u32; 10], setup: [u8; 8]) -> Vec<u8> {
@@ -453,13 +566,29 @@ mod tests {
     }
 
     impl Peer {
-        fn submit(&mut self, seq: u32, dir_in: bool, ep: u32, len: u32, setup: [u8; 8], data: &[u8]) {
-            let mut m = header([CMD_SUBMIT, seq, 0x10002, dir_in as u32, ep, 0, len, 0, 0, 0], setup);
+        fn submit(
+            &mut self,
+            seq: u32,
+            dir_in: bool,
+            ep: u32,
+            len: u32,
+            setup: [u8; 8],
+            data: &[u8],
+        ) {
+            let mut m = header(
+                [CMD_SUBMIT, seq, 0x10002, dir_in as u32, ep, 0, len, 0, 0, 0],
+                setup,
+            );
             m.extend_from_slice(data);
             self.s.write_all(&m).unwrap();
         }
         fn unlink(&mut self, seq: u32, target: u32) {
-            self.s.write_all(&header([CMD_UNLINK, seq, 0x10002, 0, 0, target, 0, 0, 0, 0], [0; 8])).unwrap();
+            self.s
+                .write_all(&header(
+                    [CMD_UNLINK, seq, 0x10002, 0, 0, target, 0, 0, 0, 0],
+                    [0; 8],
+                ))
+                .unwrap();
         }
         /// (command, seq, status, actual, data); `has_data` for an IN's RET_SUBMIT.
         fn reply_in(&mut self, has_data: bool) -> (u32, u32, i32, usize, Vec<u8>) {
@@ -475,10 +604,14 @@ mod tests {
             (cmd, seq, status, actual, data)
         }
         fn expect_quiet(&mut self) {
-            self.s.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+            self.s
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
             let mut b = [0u8; 1];
             assert!(self.s.read(&mut b).is_err(), "expected no reply");
-            self.s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            self.s
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
         }
     }
 
@@ -510,7 +643,15 @@ mod tests {
             let (cmd, seq, status, _, _) = p.reply();
             assert_eq!((cmd, seq, status), (RET_SUBMIT, want, 0));
         }
-        assert_eq!(p.toy.inner.lock().unwrap().calls, vec!["config 1", "interface 3 2", "clear 81", "control 21 22 out=2"]);
+        assert_eq!(
+            p.toy.inner.lock().unwrap().calls,
+            vec![
+                "config 1",
+                "interface 3 2",
+                "clear 81",
+                "control 21 22 out=2"
+            ]
+        );
         assert_eq!(p.toy.inner.lock().unwrap().written.len(), 0);
     }
 
@@ -543,7 +684,14 @@ mod tests {
         let (cmd, seq, status, _, _) = p.reply();
         assert_eq!((cmd, seq, status), (RET_UNLINK, 4, -ECONNRESET));
         p.expect_quiet();
-        assert!(!p.toy.inner.lock().unwrap().calls.contains(&"transfer 2".to_owned()));
+        assert!(
+            !p.toy
+                .inner
+                .lock()
+                .unwrap()
+                .calls
+                .contains(&"transfer 2".to_owned())
+        );
     }
 
     #[test]
@@ -567,7 +715,12 @@ mod tests {
             assert_eq!((cmd, seq, status, actual), (RET_SUBMIT, i + 1, 0, 4));
         }
         let written = p.toy.inner.lock().unwrap().written.clone();
-        assert_eq!(written, (0..200u32).map(|i| i.to_le_bytes().to_vec()).collect::<Vec<_>>());
+        assert_eq!(
+            written,
+            (0..200u32)
+                .map(|i| i.to_le_bytes().to_vec())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -586,7 +739,11 @@ mod tests {
     #[test]
     fn a_huge_length_ends_the_session() {
         let mut p = start();
-        p.s.write_all(&header([CMD_SUBMIT, 1, 0, 0, 2, 0, 0x7fff_ffff, 0, 0, 0], [0; 8])).unwrap();
+        p.s.write_all(&header(
+            [CMD_SUBMIT, 1, 0, 0, 2, 0, 0x7fff_ffff, 0, 0, 0],
+            [0; 8],
+        ))
+        .unwrap();
         let r = p.server.take().unwrap().join().unwrap();
         assert!(r.is_err());
     }

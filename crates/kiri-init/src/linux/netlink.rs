@@ -52,7 +52,10 @@ impl Msg {
         let mut buf = vec![0u8; 16];
         buf[4..6].copy_from_slice(&ty.to_ne_bytes());
         buf[6..8].copy_from_slice(&(flags | NLM_F_REQUEST).to_ne_bytes());
-        Msg { buf, nests: Vec::new() }
+        Msg {
+            buf,
+            nests: Vec::new(),
+        }
     }
 
     pub fn raw(&mut self, bytes: &[u8]) -> &mut Self {
@@ -62,7 +65,8 @@ impl Msg {
     }
 
     pub fn attr(&mut self, ty: u16, data: &[u8]) -> &mut Self {
-        self.buf.extend_from_slice(&((4 + data.len()) as u16).to_ne_bytes());
+        self.buf
+            .extend_from_slice(&((4 + data.len()) as u16).to_ne_bytes());
         self.buf.extend_from_slice(&ty.to_ne_bytes());
         self.buf.extend_from_slice(data);
         pad(&mut self.buf);
@@ -116,10 +120,23 @@ impl Netlink {
     /// A socket in the calling thread's current network namespace.
     pub fn open(protocol: i32) -> io::Result<Netlink> {
         // SAFETY: plain socket creation; owned immediately.
-        let fd = sys::check(unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, protocol) } as _, "netlink")?;
+        let fd = sys::check(
+            unsafe {
+                libc::socket(
+                    libc::AF_NETLINK,
+                    libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                    protocol,
+                )
+            } as _,
+            "netlink",
+        )?;
         // SAFETY: `fd` is a fresh descriptor that nothing else owns.
         let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-        Ok(Netlink { fd, seq: 1, buf: vec![0u8; 16 * 1024] })
+        Ok(Netlink {
+            fd,
+            seq: 1,
+            buf: vec![0u8; 16 * 1024],
+        })
     }
 
     /// A route socket inside another network namespace: entered just long
@@ -141,22 +158,40 @@ impl Netlink {
             self.seq += 1;
         }
         // SAFETY: sending a buffer we own on a socket we own (to the kernel).
-        sys::check(unsafe { libc::send(self.fd.as_raw_fd(), out.as_ptr().cast(), out.len(), 0) } as _, "netlink send")?;
+        sys::check(
+            unsafe { libc::send(self.fd.as_raw_fd(), out.as_ptr().cast(), out.len(), 0) } as _,
+            "netlink send",
+        )?;
         let mut acked = 0;
-        let want = msgs.iter().filter(|m| u16::from_ne_bytes([m.buf[6], m.buf[7]]) & NLM_F_ACK != 0).count();
+        let want = msgs
+            .iter()
+            .filter(|m| u16::from_ne_bytes([m.buf[6], m.buf[7]]) & NLM_F_ACK != 0)
+            .count();
         while acked < want {
             // SAFETY: receiving into a buffer we own.
-            let n = sys::check(unsafe { libc::recv(self.fd.as_raw_fd(), self.buf.as_mut_ptr().cast(), self.buf.len(), 0) } as _, "netlink recv")? as usize;
+            let n = sys::check(
+                unsafe {
+                    libc::recv(
+                        self.fd.as_raw_fd(),
+                        self.buf.as_mut_ptr().cast(),
+                        self.buf.len(),
+                        0,
+                    )
+                } as _,
+                "netlink recv",
+            )? as usize;
             let mut off = 0;
             while off + 16 <= n {
-                let len = u32::from_ne_bytes(self.buf[off..off + 4].try_into().expect("4")) as usize;
+                let len =
+                    u32::from_ne_bytes(self.buf[off..off + 4].try_into().expect("4")) as usize;
                 let ty = u16::from_ne_bytes(self.buf[off + 4..off + 6].try_into().expect("2"));
                 let seq = u32::from_ne_bytes(self.buf[off + 8..off + 12].try_into().expect("4"));
                 if len < 16 || off + len > n {
                     break;
                 }
                 if ty == NLMSG_ERROR && seq >= first && seq < self.seq {
-                    let code = i32::from_ne_bytes(self.buf[off + 16..off + 20].try_into().expect("4"));
+                    let code =
+                        i32::from_ne_bytes(self.buf[off + 16..off + 20].try_into().expect("4"));
                     acked += 1;
                     if code != 0 {
                         return Err(io::Error::from_raw_os_error(-code));
@@ -192,12 +227,14 @@ pub fn create_bridge(nl: &mut Netlink, name: &str) -> io::Result<()> {
     match nl.request(&mut [new_bridge(name, bridge_mac(random_bytes()))]) {
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
             // NET_ADDR_SET (3): someone set it, so it no longer follows the ports.
-            let kind = std::fs::read_to_string(format!("/sys/class/net/{name}/addr_assign_type")).unwrap_or_default();
+            let kind = std::fs::read_to_string(format!("/sys/class/net/{name}/addr_assign_type"))
+                .unwrap_or_default();
             if kind.trim() == "3" {
                 return Ok(());
             }
             let mut m = Msg::new(RTM_NEWLINK, NLM_F_ACK);
-            m.raw(&ifinfo(index_of(name)?, 0, 0)).attr(IFLA_ADDRESS, &bridge_mac(random_bytes()));
+            m.raw(&ifinfo(index_of(name)?, 0, 0))
+                .attr(IFLA_ADDRESS, &bridge_mac(random_bytes()));
             nl.request(&mut [m])
         }
         r => r,
@@ -206,8 +243,12 @@ pub fn create_bridge(nl: &mut Netlink, name: &str) -> io::Result<()> {
 
 fn new_bridge(name: &str, mac: [u8; 6]) -> Msg {
     let mut m = Msg::new(RTM_NEWLINK, NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
-    m.raw(&ifinfo(0, 0, 0)).attr_str(IFLA_IFNAME, name).attr(IFLA_ADDRESS, &mac);
-    m.nest(IFLA_LINKINFO).attr_str(IFLA_INFO_KIND, "bridge").end();
+    m.raw(&ifinfo(0, 0, 0))
+        .attr_str(IFLA_IFNAME, name)
+        .attr(IFLA_ADDRESS, &mac);
+    m.nest(IFLA_LINKINFO)
+        .attr_str(IFLA_INFO_KIND, "bridge")
+        .end();
     m
 }
 
@@ -219,7 +260,8 @@ fn bridge_mac(mut b: [u8; 6]) -> [u8; 6] {
 
 fn random_bytes() -> [u8; 6] {
     let mut b = [0u8; 6];
-    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
+    let _ = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b));
     b
 }
 
@@ -227,13 +269,26 @@ fn random_bytes() -> [u8; 6] {
 /// peer is created straight inside `netns` as `peer`. The kernel picks the
 /// peer's interface index: a new namespace is not always only lo (with ipip
 /// or gre loaded it has tunl0, gre0 … too), so it is looked up by name.
-pub fn create_veth(nl: &mut Netlink, host: &str, bridge_index: i32, netns: &std::fs::File, mtu: u32, peer: &str, peer_mac: Option<[u8; 6]>) -> io::Result<()> {
+pub fn create_veth(
+    nl: &mut Netlink,
+    host: &str,
+    bridge_index: i32,
+    netns: &std::fs::File,
+    mtu: u32,
+    peer: &str,
+    peer_mac: Option<[u8; 6]>,
+) -> io::Result<()> {
     let mut m = Msg::new(RTM_NEWLINK, NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
-    m.raw(&ifinfo(0, libc::IFF_UP as u32, libc::IFF_UP as u32)).attr_str(IFLA_IFNAME, host).attr_u32(IFLA_MASTER, bridge_index as u32);
+    m.raw(&ifinfo(0, libc::IFF_UP as u32, libc::IFF_UP as u32))
+        .attr_str(IFLA_IFNAME, host)
+        .attr_u32(IFLA_MASTER, bridge_index as u32);
     m.attr_u32(IFLA_MTU, mtu);
     m.nest(IFLA_LINKINFO).attr_str(IFLA_INFO_KIND, "veth");
     m.nest(IFLA_INFO_DATA).nest(VETH_INFO_PEER);
-    m.raw(&ifinfo(0, 0, 0)).attr_str(IFLA_IFNAME, peer).attr_u32(IFLA_NET_NS_FD, netns.as_raw_fd() as u32).attr_u32(IFLA_MTU, mtu);
+    m.raw(&ifinfo(0, 0, 0))
+        .attr_str(IFLA_IFNAME, peer)
+        .attr_u32(IFLA_NET_NS_FD, netns.as_raw_fd() as u32)
+        .attr_u32(IFLA_MTU, mtu);
     if let Some(mac) = peer_mac {
         m.attr(IFLA_ADDRESS, &mac);
     }
@@ -295,7 +350,9 @@ pub fn add_default_route6(nl: &mut Netlink, index: i32, gateway: [u8; 16]) -> io
     rt[5] = libc::RTPROT_BOOT;
     rt[6] = libc::RT_SCOPE_UNIVERSE;
     rt[7] = libc::RTN_UNICAST;
-    m.raw(&rt).attr(RTA_GATEWAY, &gateway).attr_u32(RTA_OIF, index as u32);
+    m.raw(&rt)
+        .attr(RTA_GATEWAY, &gateway)
+        .attr_u32(RTA_OIF, index as u32);
     match nl.request(&mut [m]) {
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
         r => r,
@@ -311,7 +368,9 @@ pub fn add_default_route(nl: &mut Netlink, index: i32, gateway: [u8; 4]) -> io::
     rt[5] = libc::RTPROT_BOOT;
     rt[6] = libc::RT_SCOPE_UNIVERSE;
     rt[7] = libc::RTN_UNICAST;
-    m.raw(&rt).attr(RTA_GATEWAY, &gateway).attr_u32(RTA_OIF, index as u32);
+    m.raw(&rt)
+        .attr(RTA_GATEWAY, &gateway)
+        .attr_u32(RTA_OIF, index as u32);
     match nl.request(&mut [m]) {
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => Ok(()),
         r => r,
@@ -320,8 +379,18 @@ pub fn add_default_route(nl: &mut Netlink, index: i32, gateway: [u8; 4]) -> io::
 
 /// Adds (or replaces) the route `dst/prefix via gateway`, or removes it.
 /// Removing one that isn't there is fine.
-pub fn set_route(nl: &mut Netlink, dst: [u8; 4], prefix: u8, gateway: [u8; 4], add: bool) -> io::Result<()> {
-    let mut m = if add { Msg::new(RTM_NEWROUTE, NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE) } else { Msg::new(RTM_DELROUTE, NLM_F_ACK) };
+pub fn set_route(
+    nl: &mut Netlink,
+    dst: [u8; 4],
+    prefix: u8,
+    gateway: [u8; 4],
+    add: bool,
+) -> io::Result<()> {
+    let mut m = if add {
+        Msg::new(RTM_NEWROUTE, NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE)
+    } else {
+        Msg::new(RTM_DELROUTE, NLM_F_ACK)
+    };
     let mut rt = [0u8; 12];
     rt[0] = libc::AF_INET as u8;
     rt[1] = prefix;
@@ -354,11 +423,15 @@ pub fn in_netns<T>(netns: &std::fs::File, f: impl FnOnce() -> io::Result<T>) -> 
 }
 
 pub fn index_of(name: &str) -> io::Result<i32> {
-    let c = std::ffi::CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let c =
+        std::ffi::CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: valid NUL-terminated name.
     let i = unsafe { libc::if_nametoindex(c.as_ptr()) };
     if i == 0 {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("no interface {name}")));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no interface {name}"),
+        ));
     }
     Ok(i as i32)
 }
@@ -408,7 +481,11 @@ fn nft_in(family: u8, msg: u16, flags: u16) -> Msg {
 fn nat_chain(name: &str, hook: u32, priority: i32) -> Msg {
     let mut chain = nft(NFT_MSG_NEWCHAIN, NLM_F_ACK | NLM_F_CREATE);
     chain.attr_str(1, "kiri").attr_str(3, name);
-    chain.nest(4).attr_be32(1, hook).attr_be32(2, priority as u32).end();
+    chain
+        .nest(4)
+        .attr_be32(1, hook)
+        .attr_be32(2, priority as u32)
+        .end();
     chain.attr_be32(5, 1).attr_str(7, "nat");
     chain
 }
@@ -428,18 +505,78 @@ fn redirect_rule(chain: &str, addr: [u8; 4], port: u16, from_bridges: bool) -> M
     if from_bridges {
         // meta iifname => reg 1 (NFT_META_IIFNAME is 6); cmp eq on its first
         // bytes only, a prefix match as nft compiles `iifname "kiri*"`.
-        rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 6).end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "meta")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 6)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, BRIDGE_PREFIX)
+            .end()
+            .end()
+            .end();
     }
     // meta l4proto => reg 1; cmp eq tcp
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 16).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &[libc::IPPROTO_TCP as u8]).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 16)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &[libc::IPPROTO_TCP as u8])
+        .end()
+        .end()
+        .end();
     // payload network header + 16 (daddr), 4 bytes => reg 1; cmp eq addr
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16).attr_be32(4, 4).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &addr).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 16)
+        .attr_be32(4, 4)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &addr)
+        .end()
+        .end()
+        .end();
     // immediate reg 1 = port; redir to it
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 1).nest(2).attr(1, &port.to_be_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "redir").nest(2).attr_be32(1, 1).end().end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 1)
+        .nest(2)
+        .attr(1, &port.to_be_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "redir")
+        .nest(2)
+        .attr_be32(1, 1)
+        .end()
+        .end();
     rule.end();
     rule
 }
@@ -453,18 +590,95 @@ fn dns_redirect_rule(addr: [u8; 4]) -> Msg {
     let mut rule = nft(NFT_MSG_NEWRULE, NLM_F_ACK | NLM_F_CREATE | 0x800);
     rule.attr_str(1, "kiri").attr_str(2, "prerouting");
     rule.nest(4);
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 6).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 6)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, BRIDGE_PREFIX)
+        .end()
+        .end()
+        .end();
     // meta l4proto => reg 1; cmp eq udp
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 16).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &[libc::IPPROTO_UDP as u8]).end().end().end();
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16).attr_be32(4, 4).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &addr).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 16)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &[libc::IPPROTO_UDP as u8])
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 16)
+        .attr_be32(4, 4)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &addr)
+        .end()
+        .end()
+        .end();
     // payload transport header + 2 (dport), 2 bytes => reg 1; cmp eq 53
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 2).attr_be32(3, 2).attr_be32(4, 2).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &53u16.to_be_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 1).nest(2).attr(1, &53u16.to_be_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "redir").nest(2).attr_be32(1, 1).end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 2)
+        .attr_be32(3, 2)
+        .attr_be32(4, 2)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &53u16.to_be_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 1)
+        .nest(2)
+        .attr(1, &53u16.to_be_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "redir")
+        .nest(2)
+        .attr_be32(1, 1)
+        .end()
+        .end();
     rule.end();
     rule
 }
@@ -497,37 +711,192 @@ fn dnat_rule_from(chain: &str, d: &Dnat, from: Option<(i32, [u8; 4])>) -> Msg {
     rule.nest(4);
     if let Some((iif, saddr)) = from {
         // meta iif (NFT_META_IIF is 4) => reg 1; cmp eq the interface index
-        rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 4).end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &(iif as u32).to_ne_bytes()).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "meta")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 4)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, &(iif as u32).to_ne_bytes())
+            .end()
+            .end()
+            .end();
         // payload network header + 12 (saddr), 4 bytes => reg 1; cmp eq saddr
-        rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 12).attr_be32(4, 4).end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &saddr).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "payload")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .attr_be32(3, 12)
+            .attr_be32(4, 4)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, &saddr)
+            .end()
+            .end()
+            .end();
     }
     if d.host_ip == [0; 4] {
         // fib daddr type => reg 1 (NFTA_FIB_DREG, RESULT = ADDRTYPE 3, FLAGS = DADDR 2); cmp eq RTN_LOCAL
-        rule.nest(1).attr_str(1, "fib").nest(2).attr_be32(1, 1).attr_be32(2, 3).attr_be32(3, 2).end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &2u32.to_ne_bytes()).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "fib")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 3)
+            .attr_be32(3, 2)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, &2u32.to_ne_bytes())
+            .end()
+            .end()
+            .end();
         // payload daddr => reg 1; reg 1 &= 255.0.0.0; cmp neq 127.0.0.0. Without
         // it a packet for 127.0.0.1 is rewritten before routing: one arriving
         // from the LAN would reach the container instead of being dropped.
-        rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16).attr_be32(4, 4).end().end();
-        rule.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 4);
-        rule.nest(4).attr(1, &[255, 0, 0, 0]).end().nest(5).attr(1, &[0; 4]).end().end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 1).nest(3).attr(1, &[127, 0, 0, 0]).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "payload")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .attr_be32(3, 16)
+            .attr_be32(4, 4)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "bitwise")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .attr_be32(3, 4);
+        rule.nest(4)
+            .attr(1, &[255, 0, 0, 0])
+            .end()
+            .nest(5)
+            .attr(1, &[0; 4])
+            .end()
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .nest(3)
+            .attr(1, &[127, 0, 0, 0])
+            .end()
+            .end()
+            .end();
     } else {
-        rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16).attr_be32(4, 4).end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &d.host_ip).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "payload")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .attr_be32(3, 16)
+            .attr_be32(4, 4)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, &d.host_ip)
+            .end()
+            .end()
+            .end();
     }
-    let proto = if d.udp { libc::IPPROTO_UDP } else { libc::IPPROTO_TCP } as u8;
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 16).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &[proto]).end().end().end();
+    let proto = if d.udp {
+        libc::IPPROTO_UDP
+    } else {
+        libc::IPPROTO_TCP
+    } as u8;
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 16)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &[proto])
+        .end()
+        .end()
+        .end();
     // payload transport header + 2 (dport), 2 bytes => reg 1; cmp eq host_port
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 2).attr_be32(3, 2).attr_be32(4, 2).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &d.host_port.to_be_bytes()).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 2)
+        .attr_be32(3, 2)
+        .attr_be32(4, 2)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &d.host_port.to_be_bytes())
+        .end()
+        .end()
+        .end();
     // immediate reg 1 = to_ip, reg 2 = to_port; nat dnat ip addr reg 1 proto reg 2
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 1).nest(2).attr(1, &d.to_ip).end().end().end();
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 2).nest(2).attr(1, &d.to_port.to_be_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "nat").nest(2).attr_be32(1, 1).attr_be32(2, libc::AF_INET as u32).attr_be32(3, 1).attr_be32(5, 2).attr_be32(7, 2).end().end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 1)
+        .nest(2)
+        .attr(1, &d.to_ip)
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 2)
+        .nest(2)
+        .attr(1, &d.to_port.to_be_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "nat")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, libc::AF_INET as u32)
+        .attr_be32(3, 1)
+        .attr_be32(5, 2)
+        .attr_be32(7, 2)
+        .end()
+        .end();
     rule.end();
     rule
 }
@@ -543,14 +912,66 @@ fn published_masq_rule(uplink_index: i32, gateway: [u8; 4]) -> Msg {
     rule.attr_str(1, "kiri").attr_str(2, "postrouting");
     rule.nest(4);
     // meta iif (NFT_META_IIF is 4) => reg 1; cmp eq the uplink
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 4).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &(uplink_index as u32).to_ne_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 12).attr_be32(4, 4).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &gateway).end().end().end();
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 7).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 4)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &(uplink_index as u32).to_ne_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 12)
+        .attr_be32(4, 4)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &gateway)
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 7)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, BRIDGE_PREFIX)
+        .end()
+        .end()
+        .end();
     // masq, NFTA_MASQ_FLAGS = NF_NAT_RANGE_PROTO_RANDOM_FULLY (16)
-    rule.nest(1).attr_str(1, "masq").nest(2).attr_be32(1, 16).end().end();
+    rule.nest(1)
+        .attr_str(1, "masq")
+        .nest(2)
+        .attr_be32(1, 16)
+        .end()
+        .end();
     rule.end();
     rule
 }
@@ -607,24 +1028,76 @@ fn forward_filter_in(family: u8, bridges: &[String]) -> Vec<Msg> {
         rule.nest(4);
         build(&mut rule);
         // immediate verdict: dreg 0 (NFT_REG_VERDICT), NFTA_DATA_VERDICT { code }
-        rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 0).nest(2).nest(2).attr_be32(1, verdict).end().end().end().end();
+        rule.nest(1)
+            .attr_str(1, "immediate")
+            .nest(2)
+            .attr_be32(1, 0)
+            .nest(2)
+            .nest(2)
+            .attr_be32(1, verdict)
+            .end()
+            .end()
+            .end()
+            .end();
         rule.end();
         rule
     };
     // meta iifname/oifname (6/7) => reg 1; cmp `op` on the "kiri" prefix
     let ifname = |key: u32, op: u32| {
         move |r: &mut Msg| {
-            r.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, key).end().end();
-            r.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, op).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+            r.nest(1)
+                .attr_str(1, "meta")
+                .nest(2)
+                .attr_be32(1, 1)
+                .attr_be32(2, key)
+                .end()
+                .end();
+            r.nest(1)
+                .attr_str(1, "cmp")
+                .nest(2)
+                .attr_be32(1, 1)
+                .attr_be32(2, op)
+                .nest(3)
+                .attr(1, BRIDGE_PREFIX)
+                .end()
+                .end()
+                .end();
         }
     };
     // ct <key> => reg 1; reg 1 &= mask; cmp neq 0
     let ct_any = |key: u32, mask: u32| {
         move |r: &mut Msg| {
-            r.nest(1).attr_str(1, "ct").nest(2).attr_be32(1, 1).attr_be32(2, key).end().end();
-            r.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 4);
-            r.nest(4).attr(1, &mask.to_ne_bytes()).end().nest(5).attr(1, &0u32.to_ne_bytes()).end().end().end();
-            r.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 1).nest(3).attr(1, &0u32.to_ne_bytes()).end().end().end();
+            r.nest(1)
+                .attr_str(1, "ct")
+                .nest(2)
+                .attr_be32(1, 1)
+                .attr_be32(2, key)
+                .end()
+                .end();
+            r.nest(1)
+                .attr_str(1, "bitwise")
+                .nest(2)
+                .attr_be32(1, 1)
+                .attr_be32(2, 1)
+                .attr_be32(3, 4);
+            r.nest(4)
+                .attr(1, &mask.to_ne_bytes())
+                .end()
+                .nest(5)
+                .attr(1, &0u32.to_ne_bytes())
+                .end()
+                .end()
+                .end();
+            r.nest(1)
+                .attr_str(1, "cmp")
+                .nest(2)
+                .attr_be32(1, 1)
+                .attr_be32(2, 1)
+                .nest(3)
+                .attr(1, &0u32.to_ne_bytes())
+                .end()
+                .end()
+                .end();
         }
     };
     // meta iifname, oifname => reg 1; cmp eq the whole name (IFNAMSIZ, NUL-padded)
@@ -634,17 +1107,32 @@ fn forward_filter_in(family: u8, bridges: &[String]) -> Vec<Msg> {
         full[..n].copy_from_slice(&name.as_bytes()[..n]);
         move |r: &mut Msg| {
             for key in [6, 7] {
-                r.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, key).end().end();
-                r.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &full).end().end().end();
+                r.nest(1)
+                    .attr_str(1, "meta")
+                    .nest(2)
+                    .attr_be32(1, 1)
+                    .attr_be32(2, key)
+                    .end()
+                    .end();
+                r.nest(1)
+                    .attr_str(1, "cmp")
+                    .nest(2)
+                    .attr_be32(1, 1)
+                    .attr_be32(2, 0)
+                    .nest(3)
+                    .attr(1, &full)
+                    .end()
+                    .end()
+                    .end();
             }
         }
     };
     let (accept, drop) = (libc::NF_ACCEPT as u32, libc::NF_DROP as u32);
     let mut msgs = vec![
         chain,
-        rule(&ifname(7, 1), accept),                           // NFT_CMP_NEQ
+        rule(&ifname(7, 1), accept), // NFT_CMP_NEQ
         rule(&ct_any(0, CT_ESTABLISHED | CT_RELATED), accept), // NFT_CT_STATE
-        rule(&ct_any(2, CT_STATUS_DNAT), accept),              // NFT_CT_STATUS
+        rule(&ct_any(2, CT_STATUS_DNAT), accept), // NFT_CT_STATUS
     ];
     msgs.extend(bridges.iter().map(|b| rule(&same_bridge(b), accept)));
     msgs.push(rule(&|_| {}, drop));
@@ -677,21 +1165,102 @@ fn localnet_guard() -> Vec<Msg> {
     rule.attr_str(1, "kiri").attr_str(2, "input");
     rule.nest(4);
     // meta iifname => reg 1; cmp eq "kiri" prefix
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 6).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 6)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, BRIDGE_PREFIX)
+        .end()
+        .end()
+        .end();
     // payload daddr => reg 1; reg 1 &= 255.0.0.0; cmp eq 127.0.0.0
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16).attr_be32(4, 4).end().end();
-    rule.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 4);
-    rule.nest(4).attr(1, &[255, 0, 0, 0]).end().nest(5).attr(1, &[0; 4]).end().end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &[127, 0, 0, 0]).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 16)
+        .attr_be32(4, 4)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "bitwise")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 4);
+    rule.nest(4)
+        .attr(1, &[255, 0, 0, 0])
+        .end()
+        .nest(5)
+        .attr(1, &[0; 4])
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &[127, 0, 0, 0])
+        .end()
+        .end()
+        .end();
     // ct state & (established|related) == 0; ct status & dnat == 0
     for (key, mask) in [(0, CT_ESTABLISHED | CT_RELATED), (2, CT_STATUS_DNAT)] {
-        rule.nest(1).attr_str(1, "ct").nest(2).attr_be32(1, 1).attr_be32(2, key).end().end();
-        rule.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 4);
-        rule.nest(4).attr(1, &mask.to_ne_bytes()).end().nest(5).attr(1, &0u32.to_ne_bytes()).end().end().end();
-        rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &0u32.to_ne_bytes()).end().end().end();
+        rule.nest(1)
+            .attr_str(1, "ct")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, key)
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "bitwise")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 1)
+            .attr_be32(3, 4);
+        rule.nest(4)
+            .attr(1, &mask.to_ne_bytes())
+            .end()
+            .nest(5)
+            .attr(1, &0u32.to_ne_bytes())
+            .end()
+            .end()
+            .end();
+        rule.nest(1)
+            .attr_str(1, "cmp")
+            .nest(2)
+            .attr_be32(1, 1)
+            .attr_be32(2, 0)
+            .nest(3)
+            .attr(1, &0u32.to_ne_bytes())
+            .end()
+            .end()
+            .end();
     }
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 0).nest(2).nest(2).attr_be32(1, libc::NF_DROP as u32).end().end().end().end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 0)
+        .nest(2)
+        .nest(2)
+        .attr_be32(1, libc::NF_DROP as u32)
+        .end()
+        .end()
+        .end()
+        .end();
     rule.end();
     vec![chain, rule]
 }
@@ -716,17 +1285,86 @@ fn host_relay_guard(port: u16) -> Msg {
     rule.attr_str(1, "kiri").attr_str(2, "input");
     rule.nest(4);
     // meta l4proto => reg 1; cmp eq tcp
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 16).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &[libc::IPPROTO_TCP as u8]).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 16)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &[libc::IPPROTO_TCP as u8])
+        .end()
+        .end()
+        .end();
     // payload transport header + 2 (dport), 2 bytes => reg 1; cmp eq port
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 2).attr_be32(3, 2).attr_be32(4, 2).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &port.to_be_bytes()).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 2)
+        .attr_be32(3, 2)
+        .attr_be32(4, 2)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &port.to_be_bytes())
+        .end()
+        .end()
+        .end();
     // ct status & dnat == 0
-    rule.nest(1).attr_str(1, "ct").nest(2).attr_be32(1, 1).attr_be32(2, 2).end().end();
-    rule.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 4);
-    rule.nest(4).attr(1, &CT_STATUS_DNAT.to_ne_bytes()).end().nest(5).attr(1, &0u32.to_ne_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &0u32.to_ne_bytes()).end().end().end();
-    rule.nest(1).attr_str(1, "immediate").nest(2).attr_be32(1, 0).nest(2).nest(2).attr_be32(1, libc::NF_DROP as u32).end().end().end().end();
+    rule.nest(1)
+        .attr_str(1, "ct")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 2)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "bitwise")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 4);
+    rule.nest(4)
+        .attr(1, &CT_STATUS_DNAT.to_ne_bytes())
+        .end()
+        .nest(5)
+        .attr(1, &0u32.to_ne_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &0u32.to_ne_bytes())
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "immediate")
+        .nest(2)
+        .attr_be32(1, 0)
+        .nest(2)
+        .nest(2)
+        .attr_be32(1, libc::NF_DROP as u32)
+        .end()
+        .end()
+        .end()
+        .end();
     rule.end();
     rule
 }
@@ -736,7 +1374,10 @@ fn host_relay_guard(port: u16) -> Msg {
 /// machine for a port published on every address.
 fn dnat_rules(chain: &str, d: &Dnat, local: Option<&[[u8; 4]]>) -> Vec<Msg> {
     match local {
-        Some(addrs) if d.host_ip == [0; 4] => addrs.iter().map(|a| dnat_rule(chain, &Dnat { host_ip: *a, ..*d })).collect(),
+        Some(addrs) if d.host_ip == [0; 4] => addrs
+            .iter()
+            .map(|a| dnat_rule(chain, &Dnat { host_ip: *a, ..*d }))
+            .collect(),
         _ => vec![dnat_rule(chain, d)],
     }
 }
@@ -746,7 +1387,11 @@ fn dnat_rules(chain: &str, d: &Dnat, local: Option<&[[u8; 4]]>) -> Vec<Msg> {
 /// address, as Docker's MASQUERADE rule per network does (NAT66). Matched by
 /// source, as Docker does: an input interface is not known in postrouting.
 fn masq6_rule(subnet: [u8; 16], prefix: u8) -> Msg {
-    let mut rule = nft_in(libc::NFPROTO_IPV6 as u8, NFT_MSG_NEWRULE, NLM_F_ACK | NLM_F_CREATE | 0x800);
+    let mut rule = nft_in(
+        libc::NFPROTO_IPV6 as u8,
+        NFT_MSG_NEWRULE,
+        NLM_F_ACK | NLM_F_CREATE | 0x800,
+    );
     rule.attr_str(1, "kiri").attr_str(2, "postrouting");
     rule.nest(4);
     let mut mask = [0u8; 16];
@@ -755,13 +1400,57 @@ fn masq6_rule(subnet: [u8; 16], prefix: u8) -> Msg {
         *b = if bits == 0 { 0 } else { 0xffu8 << (8 - bits) };
     }
     // payload network header + 8 (saddr), 16 bytes => reg 1; reg 1 &= mask; cmp eq subnet
-    rule.nest(1).attr_str(1, "payload").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 8).attr_be32(4, 16).end().end();
-    rule.nest(1).attr_str(1, "bitwise").nest(2).attr_be32(1, 1).attr_be32(2, 1).attr_be32(3, 16);
-    rule.nest(4).attr(1, &mask).end().nest(5).attr(1, &[0; 16]).end().end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0).nest(3).attr(1, &subnet).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "payload")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 8)
+        .attr_be32(4, 16)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "bitwise")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .attr_be32(3, 16);
+    rule.nest(4)
+        .attr(1, &mask)
+        .end()
+        .nest(5)
+        .attr(1, &[0; 16])
+        .end()
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0)
+        .nest(3)
+        .attr(1, &subnet)
+        .end()
+        .end()
+        .end();
     // meta oifname => reg 1; cmp neq the "kiri" prefix
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 7).end().end();
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 1).nest(3).attr(1, BRIDGE_PREFIX).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 7)
+        .end()
+        .end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 1)
+        .nest(3)
+        .attr(1, BRIDGE_PREFIX)
+        .end()
+        .end()
+        .end();
     rule.nest(1).attr_str(1, "masq").end();
     rule.end();
     rule
@@ -835,7 +1524,16 @@ pub fn remove_nat() -> io::Result<()> {
 /// the uplink's gateway `gateway` (the Mac itself): other VMs on the NAT
 /// network, or the LAN routed through the Mac, never reach a container.
 #[allow(clippy::too_many_arguments)]
-pub fn install_nat_from(uplink_index: i32, host_addr: [u8; 4], host_port: u16, redirect: bool, dnat: &[Dnat], gateway: [u8; 4], bridges: &[String], local: Option<&[[u8; 4]]>) -> io::Result<()> {
+pub fn install_nat_from(
+    uplink_index: i32,
+    host_addr: [u8; 4],
+    host_port: u16,
+    redirect: bool,
+    dnat: &[Dnat],
+    gateway: [u8; 4],
+    bridges: &[String],
+    local: Option<&[[u8; 4]]>,
+) -> io::Result<()> {
     let mut nl = Netlink::open(libc::NETLINK_NETFILTER)?;
     // The table is replaced, not appended to (on a Linux host it outlives
     // the agent and changes with every published port), in one batch:
@@ -856,10 +1554,24 @@ pub fn install_nat_from(uplink_index: i32, host_addr: [u8; 4], host_port: u16, r
     rule.attr_str(1, "kiri").attr_str(2, "postrouting"); // NFTA_RULE_TABLE, NFTA_RULE_CHAIN
     rule.nest(4); // NFTA_RULE_EXPRESSIONS
     // meta load oif => reg 1 (NFTA_META_DREG, NFTA_META_KEY = NFT_META_OIF, which is 5)
-    rule.nest(1).attr_str(1, "meta").nest(2).attr_be32(1, 1).attr_be32(2, 5).end().end();
+    rule.nest(1)
+        .attr_str(1, "meta")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 5)
+        .end()
+        .end();
     // cmp eq reg 1, uplink index
-    rule.nest(1).attr_str(1, "cmp").nest(2).attr_be32(1, 1).attr_be32(2, 0);
-    rule.nest(3).attr(1, &(uplink_index as u32).to_ne_bytes()).end().end().end();
+    rule.nest(1)
+        .attr_str(1, "cmp")
+        .nest(2)
+        .attr_be32(1, 1)
+        .attr_be32(2, 0);
+    rule.nest(3)
+        .attr(1, &(uplink_index as u32).to_ne_bytes())
+        .end()
+        .end()
+        .end();
     // masquerade
     rule.nest(1).attr_str(1, "masq").end();
     rule.end();
@@ -888,12 +1600,28 @@ pub fn install_nat_from(uplink_index: i32, host_addr: [u8; 4], host_port: u16, r
     let pre_rule = redirect_rule("prerouting", host_addr, host_port, true);
     // The host's own connections (and `--network host` containers).
     let out_rule = redirect_rule("output", host_addr, host_port, false);
-    let mut msgs = vec![begin, add, delete, table, chain, rule, pre, out, dns_redirect_rule(host_addr), pre_rule, out_rule];
+    let mut msgs = vec![
+        begin,
+        add,
+        delete,
+        table,
+        chain,
+        rule,
+        pre,
+        out,
+        dns_redirect_rule(host_addr),
+        pre_rule,
+        out_rule,
+    ];
     msgs.extend(forward_filter(bridges));
     msgs.extend(localnet_guard());
     msgs.push(host_relay_guard(host_port));
     for d in dnat.iter().filter(|d| !d.udp) {
-        msgs.push(dnat_rule_from("prerouting", d, Some((uplink_index, gateway))));
+        msgs.push(dnat_rule_from(
+            "prerouting",
+            d,
+            Some((uplink_index, gateway)),
+        ));
     }
     if dnat.iter().any(|d| !d.udp) {
         msgs.push(published_masq_rule(uplink_index, gateway));
@@ -919,7 +1647,10 @@ mod tests {
     }
 
     fn get<'a>(a: &[(u16, &'a [u8])], ty: u16) -> &'a [u8] {
-        a.iter().find(|(t, _)| *t == ty).map(|(_, d)| *d).expect("attribute")
+        a.iter()
+            .find(|(t, _)| *t == ty)
+            .map(|(_, d)| *d)
+            .expect("attribute")
     }
 
     fn be32(d: &[u8]) -> u32 {
@@ -937,7 +1668,11 @@ mod tests {
             let ty = |m: &Msg| u16::from_ne_bytes([m.buf[4], m.buf[5]]);
             let flags = |m: &Msg| u16::from_ne_bytes([m.buf[6], m.buf[7]]);
             assert_eq!(ty(&add), (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWTABLE);
-            assert_eq!(flags(&add) & (NLM_F_CREATE | NLM_F_EXCL), NLM_F_CREATE, "adding must not fail when the table exists");
+            assert_eq!(
+                flags(&add) & (NLM_F_CREATE | NLM_F_EXCL),
+                NLM_F_CREATE,
+                "adding must not fail when the table exists"
+            );
             assert_eq!(ty(&delete), (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_DELTABLE);
             for m in [&add, &delete] {
                 assert_eq!(m.buf[16], family);
@@ -967,8 +1702,15 @@ mod tests {
             .into_iter()
             .map(|(_, e)| {
                 let e = attrs(e);
-                let name = String::from_utf8(get(&e, 1).split(|b| *b == 0).next().unwrap().to_vec()).unwrap();
-                (name, e.iter().find(|(t, _)| *t == 2).map_or(Vec::new(), |(_, d)| attrs(d)))
+                let name =
+                    String::from_utf8(get(&e, 1).split(|b| *b == 0).next().unwrap().to_vec())
+                        .unwrap();
+                (
+                    name,
+                    e.iter()
+                        .find(|(t, _)| *t == 2)
+                        .map_or(Vec::new(), |(_, d)| attrs(d)),
+                )
             })
             .collect()
     }
@@ -994,7 +1736,8 @@ mod tests {
         // let any network reach any other.
         for r in rules {
             let e = exprs(r);
-            let iifname_only = names(r) == ["meta", "cmp", "immediate"] && be32(get(&e[0].1, 2)) == 6;
+            let iifname_only =
+                names(r) == ["meta", "cmp", "immediate"] && be32(get(&e[0].1, 2)) == 6;
             assert!(!iifname_only, "a bridge-to-any-bridge accept");
         }
         // One rule per bridge: in by it and out by it, the whole name. No
@@ -1027,37 +1770,80 @@ mod tests {
         let subnet = [0xfd, 0, 0, 1, 0, 2, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0];
         let r = masq6_rule(subnet, 64);
         assert_eq!(r.buf[16], libc::NFPROTO_IPV6 as u8, "an ip6 table");
-        assert_eq!(names(&r), ["payload", "bitwise", "cmp", "meta", "cmp", "masq"]);
+        assert_eq!(
+            names(&r),
+            ["payload", "bitwise", "cmp", "meta", "cmp", "masq"]
+        );
         let e = exprs(&r);
         // network header + 8, 16 bytes: ip6 saddr
-        assert_eq!((be32(get(&e[0].1, 2)), be32(get(&e[0].1, 3)), be32(get(&e[0].1, 4))), (1, 8, 16));
+        assert_eq!(
+            (
+                be32(get(&e[0].1, 2)),
+                be32(get(&e[0].1, 3)),
+                be32(get(&e[0].1, 4))
+            ),
+            (1, 8, 16)
+        );
         let mask = get(&attrs(get(&e[1].1, 4)), 1);
-        assert_eq!(mask, &[255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            mask,
+            &[
+                255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
         assert_eq!(get(&attrs(get(&e[2].1, 3)), 1), &subnet);
         assert_eq!(be32(get(&e[3].1, 2)), 7, "meta oifname");
         assert_eq!(be32(get(&e[4].1, 2)), 1, "cmp neq");
         let odd = masq6_rule(subnet, 61);
         let e = exprs(&odd);
-        assert_eq!(get(&attrs(get(&e[1].1, 4)), 1)[..8], [255, 255, 255, 255, 255, 255, 255, 0xf8]);
+        assert_eq!(
+            get(&attrs(get(&e[1].1, 4)), 1)[..8],
+            [255, 255, 255, 255, 255, 255, 255, 0xf8]
+        );
         // the IPv6 forward filter is the IPv4 one in another family
         let bridges = ["kiri3".to_owned()];
         let f = forward_filter_in(libc::NFPROTO_IPV6 as u8, &bridges);
         assert_eq!(f.len(), forward_filter(&bridges).len());
-        assert!(f[1..].iter().all(|m| !names(m).contains(&"fib".to_owned())), "no nft_fib_ipv6 needed");
+        assert!(
+            f[1..].iter().all(|m| !names(m).contains(&"fib".to_owned())),
+            "no nft_fib_ipv6 needed"
+        );
         assert!(f.iter().all(|m| m.buf[16] == libc::NFPROTO_IPV6 as u8));
     }
 
     #[test]
     fn host_relay_takes_only_redirected_connections() {
         let r = host_relay_guard(1026);
-        assert_eq!(names(&r), ["meta", "cmp", "payload", "cmp", "ct", "bitwise", "cmp", "immediate"]);
+        assert_eq!(
+            names(&r),
+            [
+                "meta",
+                "cmp",
+                "payload",
+                "cmp",
+                "ct",
+                "bitwise",
+                "cmp",
+                "immediate"
+            ]
+        );
         let e = exprs(&r);
         assert_eq!(get(&attrs(get(&e[1].1, 3)), 1), &[libc::IPPROTO_TCP as u8]);
         // transport header + 2, 2 bytes: dport
-        assert_eq!((be32(get(&e[2].1, 2)), be32(get(&e[2].1, 3)), be32(get(&e[2].1, 4))), (2, 2, 2));
+        assert_eq!(
+            (
+                be32(get(&e[2].1, 2)),
+                be32(get(&e[2].1, 3)),
+                be32(get(&e[2].1, 4))
+            ),
+            (2, 2, 2)
+        );
         assert_eq!(get(&attrs(get(&e[3].1, 3)), 1), &1026u16.to_be_bytes());
         assert_eq!(be32(get(&e[4].1, 2)), 2, "ct status");
-        assert_eq!(get(&attrs(get(&e[5].1, 4)), 1), &CT_STATUS_DNAT.to_ne_bytes());
+        assert_eq!(
+            get(&attrs(get(&e[5].1, 4)), 1),
+            &CT_STATUS_DNAT.to_ne_bytes()
+        );
         assert_eq!(be32(get(&e[6].1, 2)), 0, "== 0");
         assert_eq!(verdict(&r), libc::NF_DROP as u32);
     }

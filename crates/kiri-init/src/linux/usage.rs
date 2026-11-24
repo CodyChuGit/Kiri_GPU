@@ -32,7 +32,9 @@ pub fn measure(layers: &Path, containers: &Path, volumes: &Path) -> Vec<String> 
 
 /// The directories in `dir`, by a name that is safe on one line.
 fn entries(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
-    let Ok(read) = fs::read_dir(dir) else { return Vec::new() };
+    let Ok(read) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
     read.flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| {
@@ -44,13 +46,17 @@ fn entries(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
 
 /// Bytes allocated under `root`, on `root`'s filesystem only.
 pub fn du(root: &Path) -> u64 {
-    let Ok(top) = fs::symlink_metadata(root) else { return 0 };
+    let Ok(top) = fs::symlink_metadata(root) else {
+        return 0;
+    };
     let dev = top.dev();
     let mut seen = HashSet::new();
     let mut total = top.blocks() * 512;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read) = fs::read_dir(&dir) else { continue };
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read.flatten() {
             let Ok(m) = entry.metadata() else { continue };
             if m.dev() != dev {
@@ -76,28 +82,42 @@ mod tests {
     fn counts_files_once_and_lists_each_kind() {
         let root = std::env::temp_dir().join(format!("kiri-usage-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let (layers, containers, volumes) = (root.join("layers"), root.join("containers"), root.join("volumes"));
+        let (layers, containers, volumes) = (
+            root.join("layers"),
+            root.join("containers"),
+            root.join("volumes"),
+        );
         fs::create_dir_all(layers.join("ab12")).unwrap();
         fs::create_dir_all(containers.join("c1/upper")).unwrap();
         fs::create_dir_all(volumes.join("data/_data/sub")).unwrap();
         fs::write(layers.join("ab12/f"), vec![1u8; 64 << 10]).unwrap();
         fs::write(volumes.join("data/_data/sub/big"), vec![1u8; 256 << 10]).unwrap();
         // A hard link costs nothing more; a symlink is not followed.
-        fs::hard_link(volumes.join("data/_data/sub/big"), volumes.join("data/_data/again")).unwrap();
+        fs::hard_link(
+            volumes.join("data/_data/sub/big"),
+            volumes.join("data/_data/again"),
+        )
+        .unwrap();
         std::os::unix::fs::symlink(&layers, volumes.join("data/_data/link")).unwrap();
         // A plain file in the store is not an entry.
         fs::write(layers.join("ab12.done"), b"").unwrap();
 
         let lines = measure(&layers, &containers, &volumes);
         let size = |kind: &str, name: &str| -> u64 {
-            let l = lines.iter().find(|l| l.starts_with(&format!("{kind} {name} "))).unwrap_or_else(|| panic!("no {kind} {name} in {lines:?}"));
+            let l = lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{kind} {name} ")))
+                .unwrap_or_else(|| panic!("no {kind} {name} in {lines:?}"));
             l.rsplit(' ').next().unwrap().parse().unwrap()
         };
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(size("l", "ab12") >= 64 << 10);
         assert!(size("c", "c1") < 64 << 10);
         let v = size("v", "data");
-        assert!((256 << 10..512 << 10).contains(&v), "the hard link was counted twice, or the symlink followed: {v}");
+        assert!(
+            (256 << 10..512 << 10).contains(&v),
+            "the hard link was counted twice, or the symlink followed: {v}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -20,32 +20,32 @@ mod mac;
 use mac as window;
 #[cfg(target_os = "linux")]
 mod gtk;
+#[cfg(target_os = "macos")]
+use crate::{import, setup, update};
 #[cfg(target_os = "linux")]
 use gtk as window;
 pub use window::run;
-#[cfg(target_os = "macos")]
-use crate::{import, setup, update};
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 use linux::{import, setup, update};
 
 mod assemble;
-mod lang;
-#[cfg(unix)]
-mod term;
-mod termwire;
 mod brands;
-mod recheck;
 mod detail;
 mod hub;
 mod k8s;
+mod lang;
 mod lastlogs;
 mod logins;
-mod weblogin;
 mod needs;
+mod recheck;
 mod sharing;
+#[cfg(unix)]
+mod term;
+mod termwire;
 mod usage;
+mod weblogin;
 
 use crate::client;
 use crate::diag;
@@ -78,7 +78,10 @@ enum Cmd {
     /// An image, and the environment the Run popover asked for.
     Run(String, Vec<String>),
     /// `start`, `stop`, `restart`, `pause`, `unpause` or `remove`.
-    Container { action: String, id: String },
+    Container {
+        action: String,
+        id: String,
+    },
     RemoveVolume(String),
     RemoveNetwork(String),
     /// Settings → About: the engine's details.
@@ -86,8 +89,14 @@ enum Cmd {
     /// Settings → Domains: turn `*.kiri.local` on or off (asks for the password).
     Domains(bool),
     /// New published ports for a container: `[{container_port, host_port, proto, host_ip}]`.
-    Ports { id: String, ports: serde_json::Value },
-    Env { id: String, env: Vec<String> },
+    Ports {
+        id: String,
+        ports: serde_json::Value,
+    },
+    Env {
+        id: String,
+        env: Vec<String>,
+    },
 }
 
 impl Cmd {
@@ -141,7 +150,6 @@ fn text_or_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::E
     })
 }
 
-
 /// What the menu bar menu shows, as of the engine thread's last refresh.
 struct MenuState {
     vm: &'static str,
@@ -149,7 +157,10 @@ struct MenuState {
     running: Vec<(String, String, Option<String>)>,
 }
 
-static MENU: std::sync::Mutex<MenuState> = std::sync::Mutex::new(MenuState { vm: "Not running", running: Vec::new() });
+static MENU: std::sync::Mutex<MenuState> = std::sync::Mutex::new(MenuState {
+    vm: "Not running",
+    running: Vec::new(),
+});
 
 fn menu_state() -> std::sync::MutexGuard<'static, MenuState> {
     MENU.lock().unwrap_or_else(|e| e.into_inner())
@@ -162,16 +173,31 @@ fn local_url(c: &serde_json::Value) -> Option<String> {
         return None;
     }
     let label = |k: &str| c["Labels"][k].as_str().unwrap_or("");
-    let suffix = if crate::daemon::dns::installed() { "kiri.local" } else { "kiri.localhost" };
-    let chosen = label("dev.kiri.domain").split(',').next().unwrap_or("").trim();
-    let chosen = chosen.strip_suffix(".kiri.localhost").or_else(|| chosen.strip_suffix(".kiri.local")).unwrap_or(chosen);
+    let suffix = if crate::daemon::dns::installed() {
+        "kiri.local"
+    } else {
+        "kiri.localhost"
+    };
+    let chosen = label("dev.kiri.domain")
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let chosen = chosen
+        .strip_suffix(".kiri.localhost")
+        .or_else(|| chosen.strip_suffix(".kiri.local"))
+        .unwrap_or(chosen);
     let name = c["Names"][0].as_str().unwrap_or("").trim_start_matches('/');
     let host = match (chosen, label("com.docker.compose.project")) {
         (c, _) if !c.is_empty() => c.to_owned(),
         (_, p) if !p.is_empty() => format!("{}.{p}", label("com.docker.compose.service")),
         _ => name.to_owned(),
     };
-    let scheme = if crate::daemon::tls::trusted() { "https" } else { "http" };
+    let scheme = if crate::daemon::tls::trusted() {
+        "https"
+    } else {
+        "http"
+    };
     Some(format!("{scheme}://{host}.{suffix}"))
 }
 
@@ -227,7 +253,9 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
         match cmd {
             Ok(Cmd::Start) => {
                 emit(state("booting", None));
-                match ensure_daemon().and_then(|()| expect_ok(client::request("POST", "/kiri/wake", None))) {
+                match ensure_daemon()
+                    .and_then(|()| expect_ok(client::request("POST", "/kiri/wake", None)))
+                {
                     Ok(()) => {
                         // `docker build` through Kiri, if setup ran before the daemon was up.
                         std::thread::spawn(setup::ensure_builder);
@@ -276,7 +304,10 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
             Ok(Cmd::Run(name, env)) => {
                 // The page shows Starting… until this says how it went.
                 let result = run_image(&name, &env);
-                emit(serde_json::json!({"type": "ran", "name": name, "error": result.is_err()}).to_string());
+                emit(
+                    serde_json::json!({"type": "ran", "name": name, "error": result.is_err()})
+                        .to_string(),
+                );
                 act("run", result)
             }
             Ok(Cmd::RemoveImage(name, with)) => {
@@ -284,10 +315,28 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
                 // running one refuses, and then the image stays too.
                 let mut blocked = None;
                 for id in &with {
-                    match client::request("DELETE", &format!("/containers/{}", path_escape(id)), None) {
+                    match client::request(
+                        "DELETE",
+                        &format!("/containers/{}", path_escape(id)),
+                        None,
+                    ) {
                         Ok(r) if r.ok() || r.status == 404 => {}
-                        Ok(r) => blocked = Some(trf("Kept {name}: {container} couldn't be removed ({error})", &[("name", &name), ("container", &container_name(id)), ("error", &r.error())])),
-                        Err(e) => blocked = Some(trf("Kept {name}: {error}", &[("name", &name), ("error", &e)])),
+                        Ok(r) => {
+                            blocked = Some(trf(
+                                "Kept {name}: {container} couldn't be removed ({error})",
+                                &[
+                                    ("name", &name),
+                                    ("container", &container_name(id)),
+                                    ("error", &r.error()),
+                                ],
+                            ))
+                        }
+                        Err(e) => {
+                            blocked = Some(trf(
+                                "Kept {name}: {error}",
+                                &[("name", &name), ("error", &e)],
+                            ))
+                        }
                     }
                     if blocked.is_some() {
                         break;
@@ -295,10 +344,17 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
                 }
                 match blocked {
                     Some(why) => emit(notice("error", &why)),
-                    None => match client::request("DELETE", &format!("/images/{}", path_escape(&name)), None) {
+                    None => match client::request(
+                        "DELETE",
+                        &format!("/images/{}", path_escape(&name)),
+                        None,
+                    ) {
                         Ok(r) if r.ok() => {
                             // Only untagged when another name still points at it: nothing freed.
-                            let deleted = r.json().as_array().is_some_and(|a| a.iter().any(|v| v.get("Deleted").is_some()));
+                            let deleted = r
+                                .json()
+                                .as_array()
+                                .is_some_and(|a| a.iter().any(|v| v.get("Deleted").is_some()));
                             emit(serde_json::json!({"type": "removed", "name": name, "deleted": deleted}).to_string());
                         }
                         Ok(r) => emit(notice("error", &image_refusal(&name, &r.error()))),
@@ -311,7 +367,9 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
             Ok(Cmd::Container { action, id }) => {
                 let (method, path) = match action.as_str() {
                     "remove" => ("DELETE", format!("/containers/{id}?force=1&v=1")),
-                    a @ ("start" | "stop" | "restart" | "pause" | "unpause") => ("POST", format!("/containers/{id}/{a}")),
+                    a @ ("start" | "stop" | "restart" | "pause" | "unpause") => {
+                        ("POST", format!("/containers/{id}/{a}"))
+                    }
                     _ => continue,
                 };
                 let result = expect_ok(client::request(method, &path, None));
@@ -321,17 +379,40 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
                 }
                 act(&action, result);
             }
-            Ok(Cmd::RemoveVolume(name)) => act("rmvol", expect_ok(client::request("DELETE", &format!("/volumes/{}", path_escape(&name)), None))),
+            Ok(Cmd::RemoveVolume(name)) => act(
+                "rmvol",
+                expect_ok(client::request(
+                    "DELETE",
+                    &format!("/volumes/{}", path_escape(&name)),
+                    None,
+                )),
+            ),
             Ok(Cmd::Ports { id, ports }) => act("ports", set_ports(&id, ports)),
             Ok(Cmd::Env { id, env }) => act("env", set_env(&id, env)),
             Ok(Cmd::About) => about(),
             Ok(Cmd::Domains(on)) => {
-                let result = if on { setup::domains() } else { setup::remove_domains() };
+                let result = if on {
+                    setup::domains()
+                } else {
+                    setup::remove_domains()
+                };
                 // Cancelling macOS's password prompt is a choice, not an error.
                 match result {
-                    Err(e) if !e.to_string().contains("-128") => emit(notice("error", &trf("Could not change container names: {error}", &[("error", &e)]))),
-                    _ if crate::daemon::dns::installed() => emit(notice("ok", &tr("Containers now answer at <name>.kiri.local"))),
-                    _ if !on => emit(notice("ok", &tr("Containers answer at <name>.kiri.localhost"))),
+                    Err(e) if !e.to_string().contains("-128") => emit(notice(
+                        "error",
+                        &trf(
+                            "Could not change container names: {error}",
+                            &[("error", &e)],
+                        ),
+                    )),
+                    _ if crate::daemon::dns::installed() => emit(notice(
+                        "ok",
+                        &tr("Containers now answer at <name>.kiri.local"),
+                    )),
+                    _ if !on => emit(notice(
+                        "ok",
+                        &tr("Containers answer at <name>.kiri.localhost"),
+                    )),
                     _ => {}
                 }
                 // /var/run/docker.sock was asked for with the same password.
@@ -341,11 +422,16 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
                 emit(domains_event());
                 refresh(&mut connected);
             }
-            Ok(Cmd::RemoveNetwork(id)) => act("rmnet", expect_ok(client::request("DELETE", &format!("/networks/{id}"), None))),
+            Ok(Cmd::RemoveNetwork(id)) => act(
+                "rmnet",
+                expect_ok(client::request("DELETE", &format!("/networks/{id}"), None)),
+            ),
             Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {
                 vm_panel(&mut connected);
-                if connected && LISTED.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= LIST_EVERY {
+                if connected
+                    && LISTED.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= LIST_EVERY
+                {
                     refresh(&mut connected);
                 }
             }
@@ -356,20 +442,28 @@ fn engine(rx: Receiver<Cmd>, tx: Sender<Cmd>) {
 /// Follows the daemon's event stream on its own thread; each event asks
 /// the engine for a refresh. Reconnects when the daemon comes back.
 fn watch(tx: Sender<Cmd>) {
-    let _ = std::thread::Builder::new().name("kiri-ui-events".into()).spawn(move || loop {
-        if client::alive() {
-            if tx.send(Cmd::Refresh).is_err() {
-                return;
+    let _ = std::thread::Builder::new()
+        .name("kiri-ui-events".into())
+        .spawn(move || {
+            loop {
+                if client::alive() {
+                    if tx.send(Cmd::Refresh).is_err() {
+                        return;
+                    }
+                    let _ = client::events(|_| tx.send(Cmd::Refresh).is_ok());
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
-            let _ = client::events(|_| tx.send(Cmd::Refresh).is_ok());
-        }
-        std::thread::sleep(Duration::from_secs(1));
-    });
+        });
 }
 
 fn expect_ok(r: io::Result<client::Response>) -> io::Result<()> {
     let r = r?;
-    if r.ok() { Ok(()) } else { Err(io::Error::other(r.error())) }
+    if r.ok() {
+        Ok(())
+    } else {
+        Err(io::Error::other(r.error()))
+    }
 }
 
 /// An action's outcome: errors become a toast, and a log line saying what
@@ -382,12 +476,24 @@ fn act(what: &str, result: io::Result<()>) {
 }
 
 fn path_escape(s: &str) -> String {
-    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~:/@".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~:/@".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 /// Opens a URL, file or folder the way the system would on a double-click.
 pub(crate) fn open(target: impl AsRef<std::ffi::OsStr>) {
-    let opener = if cfg!(target_os = "macos") { "/usr/bin/open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    };
     let _ = std::process::Command::new(opener).arg(target).spawn();
 }
 
@@ -395,13 +501,28 @@ pub(crate) fn open(target: impl AsRef<std::ffi::OsStr>) {
 /// on Linux (or just the folder, when it can't select).
 pub(crate) fn reveal(path: &std::path::Path) {
     if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+        let _ = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
         return;
     }
     let uri = format!("file://{}", path.display());
     let shown = std::process::Command::new("gdbus")
-        .args(["call", "--session", "--dest", "org.freedesktop.FileManager1", "--object-path", "/org/freedesktop/FileManager1"])
-        .args(["--method", "org.freedesktop.FileManager1.ShowItems", &format!("['{uri}']"), ""])
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.FileManager1",
+            "--object-path",
+            "/org/freedesktop/FileManager1",
+        ])
+        .args([
+            "--method",
+            "org.freedesktop.FileManager1.ShowItems",
+            &format!("['{uri}']"),
+            "",
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -417,9 +538,14 @@ pub(crate) fn reveal(path: &std::path::Path) {
 /// on the Mac (the tests use that).
 pub(crate) fn state_dir() -> Option<std::path::PathBuf> {
     if cfg!(target_os = "linux") && std::env::var_os("KIRI_SOCKET").is_none() {
-        return std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(crate::flavor::STATE.get()));
+        return std::env::var_os("HOME")
+            .map(|h| std::path::Path::new(&h).join(crate::flavor::STATE.get()));
     }
-    client::socket().ok()?.parent()?.parent().map(std::path::Path::to_path_buf)
+    client::socket()
+        .ok()?
+        .parent()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Kiri opening for the first time on this account: no settings were saved
@@ -433,7 +559,9 @@ fn fresh() -> bool {
 /// brings this computer's language (lang::should_ask). The welcome waits behind it.
 fn ask_language() {
     static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if lang::should_ask(fresh(), &prefs(), &lang::os_languages()) && !ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if lang::should_ask(fresh(), &prefs(), &lang::os_languages())
+        && !ASKED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
         emit(r#"{"type":"langpick"}"#.to_owned());
     }
 }
@@ -449,7 +577,10 @@ fn prefs_path() -> Option<std::path::PathBuf> {
 /// starts dark until Settings → Appearance says otherwise.
 pub(crate) fn prefs() -> serde_json::Value {
     fresh();
-    let mut p: serde_json::Value = prefs_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| serde_json::json!({}));
+    let mut p: serde_json::Value = prefs_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
     if !p.is_object() {
         p = serde_json::json!({});
     }
@@ -463,12 +594,16 @@ pub(crate) fn prefs() -> serde_json::Value {
 /// (crate::usb words it in English; these are its notes).
 fn usb_words(mut v: serde_json::Value) -> serde_json::Value {
     let note = match v["note"].as_str() {
-        Some("A device in Kiri is gone from the Mac until you detach it. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).") => {
-            tr("A device in Kiri is gone from the Mac until you detach it. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).")
-        }
-        Some("Containers run on this computer's own kernel, so they see its USB devices as they are: docker run --device with the path shown.") => {
-            tr("Containers run on this computer's own kernel, so they see its USB devices as they are: docker run --device with the path shown.")
-        }
+        Some(
+            "A device in Kiri is gone from the Mac until you detach it. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).",
+        ) => tr(
+            "A device in Kiri is gone from the Mac until you detach it. In a container: --device /dev/ttyUSB0 (serial), /dev/input (HID) or /dev/bus/usb (raw).",
+        ),
+        Some(
+            "Containers run on this computer's own kernel, so they see its USB devices as they are: docker run --device with the path shown.",
+        ) => tr(
+            "Containers run on this computer's own kernel, so they see its USB devices as they are: docker run --device with the path shown.",
+        ),
         _ => return v,
     };
     v["note"] = note.into();
@@ -495,7 +630,31 @@ fn trf(en: &str, vars: &[(&str, &dyn std::fmt::Display)]) -> String {
 }
 
 fn set_pref(name: &str, value: serde_json::Value) {
-    if !matches!(name, "font" | "mono" | "scale" | "termH" | "termFs" | "termFont" | "domainsAsked" | "theme" | "accent" | "importSeen" | "updateAuto" | "updateSkip" | "updateSnoozeUntil" | "columnWidths" | "crashReports" | "ctxSnooze" | "ctxBack" | "logSize" | "starAsked" | "setupSkip" | "lang" | "langAsked") {
+    if !matches!(
+        name,
+        "font"
+            | "mono"
+            | "scale"
+            | "termH"
+            | "termFs"
+            | "termFont"
+            | "domainsAsked"
+            | "theme"
+            | "accent"
+            | "importSeen"
+            | "updateAuto"
+            | "updateSkip"
+            | "updateSnoozeUntil"
+            | "columnWidths"
+            | "crashReports"
+            | "ctxSnooze"
+            | "ctxBack"
+            | "logSize"
+            | "starAsked"
+            | "setupSkip"
+            | "lang"
+            | "langAsked"
+    ) {
         return;
     }
     let Some(path) = prefs_path() else { return };
@@ -511,19 +670,27 @@ fn set_pref(name: &str, value: serde_json::Value) {
                 o.remove("crashReportsSince");
             }
         } else if all[name] != true {
-            all["crashReportsSince"] = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()).into();
+            all["crashReportsSince"] = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs())
+                .into();
         }
     }
     all[name] = value;
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, all.to_string()).and_then(|()| std::fs::rename(&tmp, &path)).is_err() {
-        emit(notice("error", &tr("Could not save the setting to ~/.kiri/ui.json")));
+    if std::fs::write(&tmp, all.to_string())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .is_err()
+    {
+        emit(notice(
+            "error",
+            &tr("Could not save the setting to ~/.kiri/ui.json"),
+        ));
     }
     if name == "lang" {
         window::relang();
     }
 }
-
 
 /// Reads (or saves, then reads) the proxy settings and what is in effect.
 fn proxy(save: Option<serde_json::Value>) {
@@ -548,11 +715,21 @@ fn router_ports(set: Option<serde_json::Value>) {
     if let Some(body) = set {
         match client::request("POST", "/kiri/domains", Some(&body)) {
             Ok(r) if r.ok() => emit(notice("ok", &tr("Ports changed"))),
-            Ok(r) => emit(notice("error", &trf("Could not change the ports: {error}", &[("error", &r.error())]))),
-            Err(e) => emit(notice("error", &trf("Could not change the ports: {error}", &[("error", &e)]))),
+            Ok(r) => emit(notice(
+                "error",
+                &trf(
+                    "Could not change the ports: {error}",
+                    &[("error", &r.error())],
+                ),
+            )),
+            Err(e) => emit(notice(
+                "error",
+                &trf("Could not change the ports: {error}", &[("error", &e)]),
+            )),
         }
     }
-    let mut v = client::get("/kiri/domains").unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+    let mut v = client::get("/kiri/domains")
+        .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
     v["type"] = "routerports".into();
     emit(v.to_string());
 }
@@ -576,7 +753,9 @@ fn resources(save: Option<serde_json::Value>) {
             v["type"] = "resources".into();
             emit(v.to_string());
         }
-        Err(e) => emit(serde_json::json!({"type": "resources", "error": e.to_string()}).to_string()),
+        Err(e) => {
+            emit(serde_json::json!({"type": "resources", "error": e.to_string()}).to_string())
+        }
     }
 }
 
@@ -584,9 +763,17 @@ fn resources(save: Option<serde_json::Value>) {
 /// Lite then has nothing to download. An app opened from Finder has a short
 /// PATH, so the usual places are looked at too.
 fn other_docker_cli() -> bool {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    dirs.extend([std::path::PathBuf::from("/usr/local/bin"), std::path::PathBuf::from("/opt/homebrew/bin"), home.join(".orbstack/bin")]);
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs.extend([
+        std::path::PathBuf::from("/usr/local/bin"),
+        std::path::PathBuf::from("/opt/homebrew/bin"),
+        home.join(".orbstack/bin"),
+    ]);
     dirs.iter().any(|d| d.join("docker").is_file())
 }
 
@@ -602,7 +789,10 @@ fn setup_tools() {
         });
         match result.and_then(|()| setup::after_tools()) {
             Ok(()) => emit(serde_json::json!({"type": "tools", "state": "done"}).to_string()),
-            Err(e) => emit(serde_json::json!({"type": "tools", "state": "error", "error": e.to_string()}).to_string()),
+            Err(e) => emit(
+                serde_json::json!({"type": "tools", "state": "error", "error": e.to_string()})
+                    .to_string(),
+            ),
         }
     });
 }
@@ -617,7 +807,9 @@ static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
 /// About's update row: what the last check found. `state` is uptodate,
 /// available, package (Linux: a new .deb or .rpm), test, dev or error.
 fn update_state(state: &str, latest: Option<&str>, error: Option<String>) {
-    let checked = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let checked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     emit(serde_json::json!({"type": "updatestate", "state": state, "current": env!("CARGO_PKG_VERSION"), "latest": latest, "error": error, "checked": checked}).to_string());
 }
 
@@ -630,12 +822,22 @@ fn update_state(state: &str, latest: Option<&str>, error: Option<String>) {
 fn update_check(manual: bool) {
     // Once, when the window opens: an older `kiri` that terminals run instead
     // of this one is how an update or reinstall seems not to have happened.
-    if !manual && !crate::flavor::dev()
+    if !manual
+        && !crate::flavor::dev()
         && let Some(p) = crate::stale::stale_kiri()
     {
-        emit(notice("error", &trf("{path} comes first on your PATH, so terminals run it instead of this Kiri. If it's an older Kiri, remove it: rm {path}", &[("path", &p.display())])));
+        emit(notice(
+            "error",
+            &trf(
+                "{path} comes first on your PATH, so terminals run it instead of this Kiri. If it's an older Kiri, remove it: rm {path}",
+                &[("path", &p.display())],
+            ),
+        ));
     }
-    if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned))
+    if let Some(v) = crate::client::request("GET", "/version", None)
+        .ok()
+        .filter(|r| r.ok())
+        .and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned))
         && update::newer(env!("CARGO_PKG_VERSION"), &v)
     {
         // An update went in and the engine still runs the old build: move it
@@ -643,7 +845,11 @@ fn update_check(manual: bool) {
         if manual {
             emit(serde_json::json!({"type": "enginestale", "version": v}).to_string());
         } else {
-            diag::info!("the engine runs an older Kiri; restarting it", engine = v, app = env!("CARGO_PKG_VERSION"));
+            diag::info!(
+                "the engine runs an older Kiri; restarting it",
+                engine = v,
+                app = env!("CARGO_PKG_VERSION")
+            );
             restart_engine_now();
         }
     }
@@ -661,8 +867,14 @@ fn restart_engine_now() {
         }
         Err(e) => {
             diag::error!("the engine did not restart", error = e);
-            emit(notice("error", &trf("Could not restart the engine: {error}", &[("error", &e)])));
-            if let Some(v) = client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| client::kiri_version(&r.json()).map(str::to_owned))
+            emit(notice(
+                "error",
+                &trf("Could not restart the engine: {error}", &[("error", &e)]),
+            ));
+            if let Some(v) = client::request("GET", "/version", None)
+                .ok()
+                .filter(|r| r.ok())
+                .and_then(|r| client::kiri_version(&r.json()).map(str::to_owned))
                 && update::newer(env!("CARGO_PKG_VERSION"), &v)
             {
                 emit(serde_json::json!({"type": "enginestale", "version": v}).to_string());
@@ -673,11 +885,18 @@ fn restart_engine_now() {
 
 /// Whether the feed has a newer release, and one already staged; the
 /// window's check and the 6-hourly one (recheck.rs).
-fn feed_check(manual: bool) {    // Kiri Dev is rebuilt from source, never updated from the feed, unless
+fn feed_check(manual: bool) {
+    // Kiri Dev is rebuilt from source, never updated from the feed, unless
     // KIRI_UPDATE_URL names a test feed (to try the update card and What's new).
     if crate::flavor::dev() && std::env::var_os("KIRI_UPDATE_URL").is_none() {
         if manual {
-            emit(notice("ok", &trf("{app} doesn't update itself: rebuild it with cargo xtask app-dev", &[("app", &crate::flavor::APP)])));
+            emit(notice(
+                "ok",
+                &trf(
+                    "{app} doesn't update itself: rebuild it with cargo xtask app-dev",
+                    &[("app", &crate::flavor::APP)],
+                ),
+            ));
         }
         update_state("dev", None, None);
         return;
@@ -686,7 +905,13 @@ fn feed_check(manual: bool) {    // Kiri Dev is rebuilt from source, never updat
     // from the feed either: it would "update" back to the release it came from.
     if env!("CARGO_PKG_VERSION").contains("-dev") {
         if manual {
-            emit(notice("ok", &trf("Kiri {version} is a test build: it doesn't update itself", &[("version", &env!("CARGO_PKG_VERSION"))])));
+            emit(notice(
+                "ok",
+                &trf(
+                    "Kiri {version} is a test build: it doesn't update itself",
+                    &[("version", &env!("CARGO_PKG_VERSION"))],
+                ),
+            ));
         }
         update_state("test", None, None);
         return;
@@ -703,7 +928,11 @@ fn feed_check(manual: bool) {    // Kiri Dev is rebuilt from source, never updat
     // newer one exists, and About links to the releases page, so no card.
     if cfg!(target_os = "linux") {
         match update::latest() {
-            Ok(r) => update_state("package", update::newer(&r.version, env!("CARGO_PKG_VERSION")).then_some(r.version.as_str()), None),
+            Ok(r) => update_state(
+                "package",
+                update::newer(&r.version, env!("CARGO_PKG_VERSION")).then_some(r.version.as_str()),
+                None,
+            ),
             Err(e) => update_state("error", None, Some(e.to_string())),
         }
         return;
@@ -716,13 +945,22 @@ fn feed_check(manual: bool) {    // Kiri Dev is rebuilt from source, never updat
         Ok(_) => {
             update_state("uptodate", None, None);
             if manual {
-                emit(notice("ok", &trf("Kiri {version} is the newest version", &[("version", &env!("CARGO_PKG_VERSION"))])));
+                emit(notice(
+                    "ok",
+                    &trf(
+                        "Kiri {version} is the newest version",
+                        &[("version", &env!("CARGO_PKG_VERSION"))],
+                    ),
+                ));
             }
         }
         Err(e) => {
             update_state("error", None, Some(e.to_string()));
             if manual {
-                emit(notice("error", &trf("Couldn't check for updates: {error}", &[("error", &e)])));
+                emit(notice(
+                    "error",
+                    &trf("Couldn't check for updates: {error}", &[("error", &e)]),
+                ));
             }
         }
     }
@@ -766,34 +1004,56 @@ fn update_restart() {
         Ok(version) => {
             // The new window restarts it too if this doesn't work out.
             if let Err(e) = update::restart_engine(&version) {
-                diag::error!("the engine did not restart on the update", version = version, error = e);
+                diag::error!(
+                    "the engine did not restart on the update",
+                    version = version,
+                    error = e
+                );
             }
             reopen_after_exit();
             window::quit();
         }
-        Err(e) => emit(serde_json::json!({"type": "updateerror", "error": e.to_string()}).to_string()),
+        Err(e) => {
+            emit(serde_json::json!({"type": "updateerror", "error": e.to_string()}).to_string())
+        }
     }
 }
 
 /// Opens the app (by then the new one) as soon as this process has gone.
 fn reopen_after_exit() {
     let Ok(app) = update::app() else { return };
-    let script = "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$2\"";
-    let _ = std::process::Command::new("/bin/sh").args(["-c", script, "sh", &std::process::id().to_string()]).arg(&app).spawn();
+    let script =
+        "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open \"$2\"";
+    let _ = std::process::Command::new("/bin/sh")
+        .args(["-c", script, "sh", &std::process::id().to_string()])
+        .arg(&app)
+        .spawn();
 }
 
 fn status_event() -> String {
-    let context = std::env::var("DOCKER_CONTEXT").ok().filter(|c| !c.is_empty()).or_else(|| {
-        let home = std::env::var_os("HOME")?;
-        let cfg: serde_json::Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(&home).join(".docker/config.json")).ok()?).ok()?;
-        cfg["currentContext"].as_str().map(str::to_owned)
-    });
+    let context = std::env::var("DOCKER_CONTEXT")
+        .ok()
+        .filter(|c| !c.is_empty())
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            let cfg: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(std::path::Path::new(&home).join(".docker/config.json")).ok()?,
+            )
+            .ok()?;
+            cfg["currentContext"].as_str().map(str::to_owned)
+        });
     // Linux: docker's default endpoint is the standard socket, which leads to
     // Kiri while no Docker engine has it (the package links it), and the
     // package's docker goes to Kiri's socket: that is docker using Kiri, as
     // the setup checklist says, not "Docker's default engine".
     #[cfg(target_os = "linux")]
-    let context = if context.as_deref().is_none_or(|c| c == "default") && linux::onboarding::docker_uses_kiri() { Some(crate::flavor::CONTEXT.get().to_owned()) } else { context };
+    let context = if context.as_deref().is_none_or(|c| c == "default")
+        && linux::onboarding::docker_uses_kiri()
+    {
+        Some(crate::flavor::CONTEXT.get().to_owned())
+    } else {
+        context
+    };
     serde_json::json!({"type": "status", "version": env!("CARGO_PKG_VERSION"), "dev": crate::flavor::dev(), "share": true, "app": crate::flavor::APP.get(), "ours": crate::flavor::CONTEXT.get(), "context": context.unwrap_or_else(|| "default".into())}).to_string()
 }
 
@@ -837,7 +1097,11 @@ fn published(b: &serde_json::Value) -> Option<String> {
 
 /// Saves a container's ports and says where it is reachable now.
 fn set_ports(id: &str, ports: serde_json::Value) -> io::Result<()> {
-    expect_ok(client::request("POST", &format!("/kiri/containers/{id}/ports"), Some(&serde_json::json!({"ports": ports}))))?;
+    expect_ok(client::request(
+        "POST",
+        &format!("/kiri/containers/{id}/ports"),
+        Some(&serde_json::json!({"ports": ports})),
+    ))?;
     let info = client::get(&format!("/containers/{id}/json"))?;
     let mut now: Vec<String> = Vec::new();
     if let Some(map) = info["NetworkSettings"]["Ports"].as_object() {
@@ -849,7 +1113,11 @@ fn set_ports(id: &str, ports: serde_json::Value) -> io::Result<()> {
             }
         }
     }
-    let text = if now.is_empty() { tr("Ports removed") } else { trf("Ports saved: {ports}", &[("ports", &now.join(", "))]) };
+    let text = if now.is_empty() {
+        tr("Ports removed")
+    } else {
+        trf("Ports saved: {ports}", &[("ports", &now.join(", "))])
+    };
     emit(notice("ok", &text));
     Ok(())
 }
@@ -857,14 +1125,30 @@ fn set_ports(id: &str, ports: serde_json::Value) -> io::Result<()> {
 /// A container's new environment. The engine keeps the container, files and
 /// all, and restarts it if it was running.
 fn set_env(id: &str, env: Vec<String>) -> io::Result<()> {
-    let r = client::request("POST", &format!("/kiri/containers/{id}/env"), Some(&serde_json::json!({"env": env})))?;
+    let r = client::request(
+        "POST",
+        &format!("/kiri/containers/{id}/env"),
+        Some(&serde_json::json!({"env": env})),
+    )?;
     if r.status == 404 && !r.error().contains("No such container") {
-        return Err(io::Error::other("This engine can't change a container's environment yet. Restart the engine (Settings → Engine) and try again."));
+        return Err(io::Error::other(
+            "This engine can't change a container's environment yet. Restart the engine (Settings → Engine) and try again.",
+        ));
     }
     expect_ok(Ok(r))?;
     let info = client::get(&format!("/containers/{id}/json"))?;
-    let name = info["Name"].as_str().unwrap_or_default().trim_start_matches('/');
-    let text = if info["State"]["Running"].as_bool() == Some(true) { trf("{name} restarted with the new environment", &[("name", &name)]) } else { trf("{name} has the new environment", &[("name", &name)]) };
+    let name = info["Name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let text = if info["State"]["Running"].as_bool() == Some(true) {
+        trf(
+            "{name} restarted with the new environment",
+            &[("name", &name)],
+        )
+    } else {
+        trf("{name} has the new environment", &[("name", &name)])
+    };
     emit(notice("ok", &text));
     emit(serde_json::json!({"type": "inspect", "id": id, "info": info}).to_string());
     Ok(())
@@ -881,13 +1165,24 @@ fn run_image(image: &str, env: &[String]) -> io::Result<()> {
     let began = std::time::Instant::now();
     let id = match create_and_start(image, &own, env) {
         // Taken between the check and the start: let the engine pick.
-        Err(e) if !own.is_empty() && e.to_string().contains("already allocated") => create_and_start(image, &[], env)?,
+        Err(e) if !own.is_empty() && e.to_string().contains("already allocated") => {
+            create_and_start(image, &[], env)?
+        }
         r => r?,
     };
     let info = client::get(&format!("/containers/{id}/json"))?;
-    let name = info["Name"].as_str().unwrap_or_default().trim_start_matches('/').to_owned();
+    let name = info["Name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_owned();
     // Just the name: the container's page says where it answers.
-    let published = info["NetworkSettings"]["Ports"].as_object().is_some_and(|m| m.values().any(|l| l.as_array().is_some_and(|l| !l.is_empty())));
+    let published = info["NetworkSettings"]["Ports"]
+        .as_object()
+        .is_some_and(|m| {
+            m.values()
+                .any(|l| l.as_array().is_some_and(|l| !l.is_empty()))
+        });
     let text = trf("Started {name}", &[("name", &name)]);
     // View on the toast opens the container's page; `image` puts it beside
     // that image's Run button when the list shows it; `ms` is create and start.
@@ -908,7 +1203,9 @@ fn offer_listening(id: String, name: String) {
             std::thread::sleep(Duration::from_millis(500));
             match listening(&id) {
                 None => return,
-                Some(ports) if !ports.is_empty() => return emit(listening_event(&id, &name, &ports, true)),
+                Some(ports) if !ports.is_empty() => {
+                    return emit(listening_event(&id, &name, &ports, true));
+                }
                 Some(_) => {}
             }
         }
@@ -920,16 +1217,28 @@ fn offer_listening(id: String, name: String) {
 /// free, else 0 for the engine to pick. None if the engine can't say (an
 /// older engine or VM, or the container stopped).
 fn listening(id: &str) -> Option<Vec<(u16, u16)>> {
-    let v = client::get_background(&format!("/kiri/containers/{}/listening", path_escape(id))).ok()?;
-    let ports = v["tcp"].as_array()?.iter().filter_map(|p| u16::try_from(p.as_u64()?).ok());
-    Some(ports.map(|p| (p, if free_on_mac(p, "tcp") { p } else { 0 })).collect())
+    let v =
+        client::get_background(&format!("/kiri/containers/{}/listening", path_escape(id))).ok()?;
+    let ports = v["tcp"]
+        .as_array()?
+        .iter()
+        .filter_map(|p| u16::try_from(p.as_u64()?).ok());
+    Some(
+        ports
+            .map(|p| (p, if free_on_mac(p, "tcp") { p } else { 0 }))
+            .collect(),
+    )
 }
 
 /// `offer` makes the page say so in a notice; otherwise it only notes the
 /// ports for the container's page.
 fn listening_event(id: &str, name: &str, ports: &[(u16, u16)], offer: bool) -> String {
-    let ports: Vec<_> = ports.iter().map(|(c, h)| serde_json::json!({"container_port": c, "host_port": h})).collect();
-    serde_json::json!({"type": "listening", "id": id, "name": name, "ports": ports, "offer": offer}).to_string()
+    let ports: Vec<_> = ports
+        .iter()
+        .map(|(c, h)| serde_json::json!({"container_port": c, "host_port": h}))
+        .collect();
+    serde_json::json!({"type": "listening", "id": id, "name": name, "ports": ports, "offer": offer})
+        .to_string()
 }
 
 /// Creates and starts `image` with every declared port published, `own` on
@@ -939,7 +1248,10 @@ fn create_and_start(image: &str, own: &[String], env: &[String]) -> io::Result<S
         .iter()
         .map(|key| {
             let port = key.split('/').next().unwrap_or_default();
-            (key.clone(), serde_json::json!([{"HostIp": "", "HostPort": port}]))
+            (
+                key.clone(),
+                serde_json::json!([{"HostIp": "", "HostPort": port}]),
+            )
         })
         .collect();
     let body = serde_json::json!({"Image": image, "Tty": true, "OpenStdin": true, "Env": env,
@@ -949,7 +1261,11 @@ fn create_and_start(image: &str, own: &[String], env: &[String]) -> io::Result<S
         return Err(io::Error::other(created.error()));
     }
     let id = created.json()["Id"].as_str().unwrap_or_default().to_owned();
-    if let Err(e) = expect_ok(client::request("POST", &format!("/containers/{id}/start"), None)) {
+    if let Err(e) = expect_ok(client::request(
+        "POST",
+        &format!("/containers/{id}/start"),
+        None,
+    )) {
         let _ = client::request("DELETE", &format!("/containers/{id}?force=1"), None);
         return Err(e);
     }
@@ -958,12 +1274,17 @@ fn create_and_start(image: &str, own: &[String], env: &[String]) -> io::Result<S
 
 /// The ports `image` declares (`4567/tcp`) whose number is free on the Mac.
 fn same_ports(image: &str) -> Vec<String> {
-    let Ok(info) = client::get(&format!("/images/{}/json", path_escape(image))) else { return Vec::new() };
-    let Some(map) = info["Config"]["ExposedPorts"].as_object() else { return Vec::new() };
+    let Ok(info) = client::get(&format!("/images/{}/json", path_escape(image))) else {
+        return Vec::new();
+    };
+    let Some(map) = info["Config"]["ExposedPorts"].as_object() else {
+        return Vec::new();
+    };
     map.keys()
         .filter(|key| {
             let (port, proto) = key.split_once('/').unwrap_or((key, "tcp"));
-            port.parse::<u16>().is_ok_and(|port| free_on_mac(port, proto))
+            port.parse::<u16>()
+                .is_ok_and(|port| free_on_mac(port, proto))
         })
         .cloned()
         .collect()
@@ -995,7 +1316,8 @@ fn ensure_daemon() -> io::Result<()> {
 
 /// Sends the page every list, from the daemon.
 /// When the lists last went to the page, by any route.
-static LISTED: std::sync::LazyLock<std::sync::Mutex<std::time::Instant>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::time::Instant::now()));
+static LISTED: std::sync::LazyLock<std::sync::Mutex<std::time::Instant>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::time::Instant::now()));
 
 fn refresh(connected: &mut bool) {
     *LISTED.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
@@ -1004,7 +1326,8 @@ fn refresh(connected: &mut bool) {
         let images = client::get_background("/images/json")?;
         let volumes = client::get_background("/volumes")?;
         let networks = client::get_background("/networks")?;
-        let add_icon = |mut v: serde_json::Value, name_of: &dyn Fn(&serde_json::Value) -> String| {
+        let add_icon = |mut v: serde_json::Value,
+                        name_of: &dyn Fn(&serde_json::Value) -> String| {
             if let Some(list) = v.as_array_mut() {
                 for item in list {
                     let icon = brand(&name_of(item));
@@ -1013,9 +1336,15 @@ fn refresh(connected: &mut bool) {
             }
             v
         };
-        let containers = add_icon(containers, &|c| c["Image"].as_str().unwrap_or_default().to_owned());
-        let images = add_icon(images, &|i| i["RepoTags"][0].as_str().unwrap_or_default().to_owned());
-        Ok(serde_json::json!({"type": "lists", "containers": containers, "images": images, "volumes": volumes["Volumes"], "networks": networks}))
+        let containers = add_icon(containers, &|c| {
+            c["Image"].as_str().unwrap_or_default().to_owned()
+        });
+        let images = add_icon(images, &|i| {
+            i["RepoTags"][0].as_str().unwrap_or_default().to_owned()
+        });
+        Ok(
+            serde_json::json!({"type": "lists", "containers": containers, "images": images, "volumes": volumes["Volumes"], "networks": networks}),
+        )
     })();
     match lists {
         Ok(v) => {
@@ -1024,14 +1353,27 @@ fn refresh(connected: &mut bool) {
                 .into_iter()
                 .flatten()
                 .filter(|c| c["State"] == "running")
-                .map(|c| (c["Id"].as_str().unwrap_or("").to_owned(), c["Names"][0].as_str().unwrap_or("").trim_start_matches('/').to_owned(), local_url(c)))
+                .map(|c| {
+                    (
+                        c["Id"].as_str().unwrap_or("").to_owned(),
+                        c["Names"][0]
+                            .as_str()
+                            .unwrap_or("")
+                            .trim_start_matches('/')
+                            .to_owned(),
+                        local_url(c),
+                    )
+                })
                 .collect();
             emit(v.to_string());
             vm_panel(connected);
         }
         Err(_) => {
             *connected = false;
-            *menu_state() = MenuState { vm: "Not running", running: Vec::new() };
+            *menu_state() = MenuState {
+                vm: "Not running",
+                running: Vec::new(),
+            };
             emit(state("stopped", None));
         }
     }
@@ -1040,7 +1382,9 @@ fn refresh(connected: &mut bool) {
 /// The engine's Stop, or, from an engine older than it, its sleep.
 fn stop_engine() -> io::Result<()> {
     match expect_ok(client::request("POST", "/kiri/stop", None)) {
-        Err(e) if e.to_string().contains("404") => expect_ok(client::request("POST", "/kiri/sleep", None)),
+        Err(e) if e.to_string().contains("404") => {
+            expect_ok(client::request("POST", "/kiri/sleep", None))
+        }
         r => r,
     }
 }
@@ -1059,22 +1403,40 @@ fn vm_panel(connected: &mut bool) {
             *connected = true;
             let awake = info["KiriVmAwake"].as_bool().unwrap_or(false);
             let stopped = !awake && info["KiriStopped"] == true;
-            menu_state().vm = if awake { "Running" } else if stopped { "Stopped" } else { "Asleep" };
+            menu_state().vm = if awake {
+                "Running"
+            } else if stopped {
+                "Stopped"
+            } else {
+                "Asleep"
+            };
             let mib = |k: &str| info[k].as_u64().unwrap_or(0) >> 20;
-            emit(serde_json::json!({
-                "type": "vm",
-                "awake": awake,
-                "target_mib": mib("KiriMemoryTarget"),
-                "used_mib": mib("KiriMemoryUsed"),
-                "ceiling_mib": mib("KiriMemoryCeiling"),
-                "stall_pct": info["KiriMemoryStall"],
-                "oom_kills": info["KiriOomKills"],
-                "running": info["ContainersRunning"],
-                "cpus": info["NCPU"],
-                "cpu_pct": info["KiriCpuPercent"],
-                "daemon_kib": info["KiriAgentMemory"].as_u64().unwrap_or(0) >> 10,
-            }).to_string());
-            emit(state(if awake { "running" } else if stopped { "stopped" } else { "asleep" }, None));
+            emit(
+                serde_json::json!({
+                    "type": "vm",
+                    "awake": awake,
+                    "target_mib": mib("KiriMemoryTarget"),
+                    "used_mib": mib("KiriMemoryUsed"),
+                    "ceiling_mib": mib("KiriMemoryCeiling"),
+                    "stall_pct": info["KiriMemoryStall"],
+                    "oom_kills": info["KiriOomKills"],
+                    "running": info["ContainersRunning"],
+                    "cpus": info["NCPU"],
+                    "cpu_pct": info["KiriCpuPercent"],
+                    "daemon_kib": info["KiriAgentMemory"].as_u64().unwrap_or(0) >> 10,
+                })
+                .to_string(),
+            );
+            emit(state(
+                if awake {
+                    "running"
+                } else if stopped {
+                    "stopped"
+                } else {
+                    "asleep"
+                },
+                None,
+            ));
         }
         Err(_) => {
             if *connected {
@@ -1089,15 +1451,27 @@ fn vm_panel(connected: &mut bool) {
 fn container_name(id: &str) -> String {
     client::get(&format!("/containers/{}/json", path_escape(id)))
         .ok()
-        .and_then(|c| c["Name"].as_str().map(|n| n.trim_start_matches('/').to_owned()))
+        .and_then(|c| {
+            c["Name"]
+                .as_str()
+                .map(|n| n.trim_start_matches('/').to_owned())
+        })
         .unwrap_or_else(|| id.chars().take(12).collect())
 }
 
 /// Docker's "unable to remove repository reference … (must force) - container
 /// X is using its referenced image", in plain words with the container's name.
 fn image_refusal(name: &str, error: &str) -> String {
-    match error.split("container ").nth(1).and_then(|r| r.split_whitespace().next()).filter(|_| error.contains("is using")) {
-        Some(id) => trf("{name} is still used by the container {container}. Remove the container first.", &[("name", &name), ("container", &container_name(id))]),
+    match error
+        .split("container ")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .filter(|_| error.contains("is using"))
+    {
+        Some(id) => trf(
+            "{name} is still used by the container {container}. Remove the container first.",
+            &[("name", &name), ("container", &container_name(id))],
+        ),
         None => error.to_owned(),
     }
 }
@@ -1133,10 +1507,15 @@ fn brand(name: &str) -> Option<[&'static str; 2]> {
         _ => name,
     };
     let last = repo.rsplit('/').next().unwrap_or(repo);
-    let slug = [repo, last]
-        .into_iter()
-        .find_map(|key| brands::IMAGES.binary_search_by_key(&key, |(k, _)| k).ok().map(|i| brands::IMAGES[i].1))?;
-    let i = brands::BRANDS.binary_search_by_key(&slug, |(s, _, _)| s).ok()?;
+    let slug = [repo, last].into_iter().find_map(|key| {
+        brands::IMAGES
+            .binary_search_by_key(&key, |(k, _)| k)
+            .ok()
+            .map(|i| brands::IMAGES[i].1)
+    })?;
+    let i = brands::BRANDS
+        .binary_search_by_key(&slug, |(s, _, _)| s)
+        .ok()?;
     let (_, hex, path) = brands::BRANDS[i];
     Some([hex, path])
 }
@@ -1181,9 +1560,17 @@ fn pulling() -> std::sync::MutexGuard<'static, Vec<Pulling>> {
 /// The page asked for a pull: noted, so Cancel finds it even while it waits.
 fn asked_to_pull(name: &str) {
     static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let Ok(r) = kiri_image::Reference::parse(name.trim()) else { return };
+    let Ok(r) = kiri_image::Reference::parse(name.trim()) else {
+        return;
+    };
     let run = RUN.fetch_add(1, Ordering::Relaxed);
-    pulling().push(Pulling { run, name: r.short(), taken: false, conn: None, cancelled: false });
+    pulling().push(Pulling {
+        run,
+        name: r.short(),
+        taken: false,
+        conn: None,
+        cancelled: false,
+    });
 }
 
 /// Cancel on a pull's row: its request to the engine is closed, which stops
@@ -1319,10 +1706,17 @@ fn pull(name: String) {
 /// A name typed into Pull image that doesn't exist, said plainly instead
 /// of as the registry's reply (or the raw reply an older engine passes on).
 fn pull_error(e: &str, from: &str, tag: &str) -> String {
-    let raw = |code: &str| e.contains("/manifests/") && e.contains(&format!(" returned HTTP {code}"));
-    if e.starts_with("pull access denied for ") || ((raw("401") || raw("403")) && !e.contains("incorrect username or password")) {
-        format!("Couldn't find an image called {from}. Check the name; if it's private, sign in with docker login.")
-    } else if (e.starts_with("manifest for ") && e.ends_with("not found: manifest unknown")) || raw("404") {
+    let raw =
+        |code: &str| e.contains("/manifests/") && e.contains(&format!(" returned HTTP {code}"));
+    if e.starts_with("pull access denied for ")
+        || ((raw("401") || raw("403")) && !e.contains("incorrect username or password"))
+    {
+        format!(
+            "Couldn't find an image called {from}. Check the name; if it's private, sign in with docker login."
+        )
+    } else if (e.starts_with("manifest for ") && e.ends_with("not found: manifest unknown"))
+        || raw("404")
+    {
         format!("{from} has no tag {tag}.")
     } else {
         e.to_owned()
@@ -1334,12 +1728,39 @@ mod tests {
     #[test]
     fn a_name_that_isnt_there_says_so() {
         use super::pull_error;
-        assert_eq!(pull_error("pull access denied for gall, repository does not exist or may require 'docker login'", "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
-        assert_eq!(pull_error("manifest for alpine:nope not found: manifest unknown", "alpine", "nope"), "alpine has no tag nope.");
+        assert_eq!(
+            pull_error(
+                "pull access denied for gall, repository does not exist or may require 'docker login'",
+                "gall",
+                "latest"
+            ),
+            "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login."
+        );
+        assert_eq!(
+            pull_error(
+                "manifest for alpine:nope not found: manifest unknown",
+                "alpine",
+                "nope"
+            ),
+            "alpine has no tag nope."
+        );
         let old = r#"https://registry-1.docker.io/v2/library/gall/manifests/latest returned HTTP 401: {"errors":[{"code":"UNAUTHORIZED"}]}"#;
-        assert_eq!(pull_error(old, "gall", "latest"), "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login.");
-        assert_eq!(pull_error("https://registry-1.docker.io/v2/library/alpine/manifests/nope returned HTTP 404", "alpine", "nope"), "alpine has no tag nope.");
-        assert_eq!(pull_error("network error: timed out", "alpine", "latest"), "network error: timed out");
+        assert_eq!(
+            pull_error(old, "gall", "latest"),
+            "Couldn't find an image called gall. Check the name; if it's private, sign in with docker login."
+        );
+        assert_eq!(
+            pull_error(
+                "https://registry-1.docker.io/v2/library/alpine/manifests/nope returned HTTP 404",
+                "alpine",
+                "nope"
+            ),
+            "alpine has no tag nope."
+        );
+        assert_eq!(
+            pull_error("network error: timed out", "alpine", "latest"),
+            "network error: timed out"
+        );
     }
 
     #[test]
@@ -1374,7 +1795,10 @@ mod tests {
         super::set_pref("script", "x".into());
         super::set_pref("starAsked", true.into());
         let p = super::prefs();
-        assert_eq!((p["font"].as_str(), p["scale"].as_f64(), p.get("script")), (Some("Georgia"), Some(1.1), None));
+        assert_eq!(
+            (p["font"].as_str(), p["scale"].as_f64(), p.get("script")),
+            (Some("Georgia"), Some(1.1), None)
+        );
         assert_eq!(p["starAsked"], true);
         // Check for updates automatically stays off across launches.
         super::set_pref("updateAuto", false.into());
@@ -1386,9 +1810,17 @@ mod tests {
         super::set_pref("crashReports", true.into());
         let since = super::prefs()["crashReportsSince"].as_u64().unwrap();
         assert!(since > 1);
-        std::fs::write(dir.join("ui.json"), super::prefs().to_string().replace(&since.to_string(), "5")).unwrap();
+        std::fs::write(
+            dir.join("ui.json"),
+            super::prefs().to_string().replace(&since.to_string(), "5"),
+        )
+        .unwrap();
         super::set_pref("crashReports", true.into());
-        assert_eq!(super::prefs()["crashReportsSince"], 5, "already on: its time stays");
+        assert_eq!(
+            super::prefs()["crashReportsSince"],
+            5,
+            "already on: its time stays"
+        );
         super::set_pref("crashReports", false.into());
         assert_eq!(super::prefs().get("crashReportsSince"), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1404,10 +1836,16 @@ mod tests {
             assert!(mono.iter().any(|f| f == "Menlo"), "{mono:?}");
             assert!(!mono.iter().any(|f| f == "Helvetica Neue"));
         } else {
-            assert!(!all.is_empty() && !mono.is_empty() && mono.len() < all.len(), "{all:?} {mono:?}");
+            assert!(
+                !all.is_empty() && !mono.is_empty() && mono.len() < all.len(),
+                "{all:?} {mono:?}"
+            );
         }
         assert!(all.iter().chain(&mono).all(|f| !f.starts_with('.')));
-        assert!(all.windows(2).all(|w| w[0].to_lowercase() < w[1].to_lowercase()));
+        assert!(
+            all.windows(2)
+                .all(|w| w[0].to_lowercase() < w[1].to_lowercase())
+        );
     }
 
     #[test]
@@ -1448,17 +1886,39 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             Ok(())
         }
         "rmi" => {
-            let with = msg.value.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+            let with = msg
+                .value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             tx.send(Cmd::RemoveImage(msg.name, with))
         }
         "run" => {
-            let env = msg.value.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+            let env = msg
+                .value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             tx.send(Cmd::Run(msg.name, env))
         }
-        "container" => tx.send(Cmd::Container { action: msg.action, id: msg.id }),
+        "container" => tx.send(Cmd::Container {
+            action: msg.action,
+            id: msg.id,
+        }),
         "rmvol" => tx.send(Cmd::RemoveVolume(msg.name)),
         "rmnet" => tx.send(Cmd::RemoveNetwork(msg.id)),
-        "ports" => tx.send(Cmd::Ports { id: msg.id, ports: msg.ports }),
+        "ports" => tx.send(Cmd::Ports {
+            id: msg.id,
+            ports: msg.ports,
+        }),
         // A container's page: what it listens on, when it publishes nothing.
         "listening" => {
             std::thread::spawn(move || {
@@ -1469,12 +1929,22 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             Ok(())
         }
         "env" => {
-            let env = msg.value.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+            let env = msg
+                .value
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             tx.send(Cmd::Env { id: msg.id, env })
         }
         // Settings: font lists, read off the main thread so the window keeps drawing.
         "fonts" => {
-            std::thread::spawn(|| emit(serde_json::json!({"type": "fonts", "families": window::font_families(false), "mono": window::font_families(true)}).to_string()));
+            std::thread::spawn(|| {
+                emit(serde_json::json!({"type": "fonts", "families": window::font_families(false), "mono": window::font_families(true)}).to_string())
+            });
             Ok(())
         }
         // About's Check now.
@@ -1497,7 +1967,14 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         // What's new: the feed names the page, so only runkiri.com's.
         "updatenotes" => {
-            if msg.name.strip_prefix("https://runkiri.com/").is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~/#".contains(&b))) {
+            if msg
+                .name
+                .strip_prefix("https://runkiri.com/")
+                .is_some_and(|rest| {
+                    rest.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._~/#".contains(&b))
+                })
+            {
                 open(&msg.name);
             }
             Ok(())
@@ -1527,12 +2004,27 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         "https" => {
             let on = msg.value.as_bool().unwrap_or(false);
             std::thread::spawn(move || {
-                let result = if on { crate::daemon::tls::trust() } else { crate::daemon::tls::untrust() };
+                let result = if on {
+                    crate::daemon::tls::trust()
+                } else {
+                    crate::daemon::tls::untrust()
+                };
                 match result {
-                    Ok(()) if on => emit(notice("ok", &tr("Kiri's certificate is trusted: containers open over HTTPS"))),
+                    Ok(()) if on => emit(notice(
+                        "ok",
+                        &tr("Kiri's certificate is trusted: containers open over HTTPS"),
+                    )),
                     Ok(()) => emit(notice("ok", &tr("Kiri's certificate is no longer trusted"))),
-                    Err(e) if e.to_string().contains("canceled") || e.to_string().contains("cancelled") => {}
-                    Err(e) => emit(notice("error", &trf("Could not change the certificate's trust: {error}", &[("error", &e)]))),
+                    Err(e)
+                        if e.to_string().contains("canceled")
+                            || e.to_string().contains("cancelled") => {}
+                    Err(e) => emit(notice(
+                        "error",
+                        &trf(
+                            "Could not change the certificate's trust: {error}",
+                            &[("error", &e)],
+                        ),
+                    )),
                 }
                 emit(domains_event());
             });
@@ -1547,11 +2039,26 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         "usbattach" | "usbdetach" => {
             let (attach, key) = (msg.cmd == "usbattach", msg.name);
             std::thread::spawn(move || {
-                let r = if attach { crate::usb::ui_attach(&key) } else { crate::usb::ui_detach(&key) };
+                let r = if attach {
+                    crate::usb::ui_attach(&key)
+                } else {
+                    crate::usb::ui_detach(&key)
+                };
                 match r {
-                    Ok(text) => emit(serde_json::json!({"type": "usbdone", "key": key, "text": usb_text(&text)}).to_string()),
-                    Err(e) if e.to_string().contains("canceled") || e.to_string().contains("cancelled") => emit(serde_json::json!({"type": "usbdone", "key": key}).to_string()),
-                    Err(e) => emit(serde_json::json!({"type": "usbdone", "key": key, "error": e.to_string()}).to_string()),
+                    Ok(text) => emit(
+                        serde_json::json!({"type": "usbdone", "key": key, "text": usb_text(&text)})
+                            .to_string(),
+                    ),
+                    Err(e)
+                        if e.to_string().contains("canceled")
+                            || e.to_string().contains("cancelled") =>
+                    {
+                        emit(serde_json::json!({"type": "usbdone", "key": key}).to_string())
+                    }
+                    Err(e) => emit(
+                        serde_json::json!({"type": "usbdone", "key": key, "error": e.to_string()})
+                            .to_string(),
+                    ),
                 }
                 emit(usb_words(crate::usb::ui_list()).to_string());
             });
@@ -1560,10 +2067,13 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         // The Builds view: BuildKit's history, read only while the view is open.
         "builds" => {
             std::thread::spawn(|| {
-                emit(match crate::builds::list() {
-                    Ok(b) => serde_json::json!({"type": "builds", "builds": b}),
-                    Err(e) => serde_json::json!({"type": "builds", "error": e.to_string()}),
-                }.to_string())
+                emit(
+                    match crate::builds::list() {
+                        Ok(b) => serde_json::json!({"type": "builds", "builds": b}),
+                        Err(e) => serde_json::json!({"type": "builds", "error": e.to_string()}),
+                    }
+                    .to_string(),
+                )
             });
             Ok(())
         }
@@ -1622,10 +2132,22 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         "savesbom" => {
             match crate::scan::save_sbom(&msg.name, msg.id.parse().unwrap_or(0), &msg.path) {
                 Ok(to) => {
-                    emit(notice("ok", &trf("Saved the SBOM to Downloads as {file}", &[("file", &to.file_name().unwrap_or_default().to_string_lossy())])));
+                    emit(notice(
+                        "ok",
+                        &trf(
+                            "Saved the SBOM to Downloads as {file}",
+                            &[(
+                                "file",
+                                &to.file_name().unwrap_or_default().to_string_lossy(),
+                            )],
+                        ),
+                    ));
                     reveal(&to);
                 }
-                Err(e) => emit(notice("error", &trf("Could not save the SBOM: {error}", &[("error", &e)]))),
+                Err(e) => emit(notice(
+                    "error",
+                    &trf("Could not save the SBOM: {error}", &[("error", &e)]),
+                )),
             }
             Ok(())
         }
@@ -1641,8 +2163,17 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         // A Kubernetes service or pod: value {ip, port, label}.
         "k8sshare" => {
             let v = &msg.value;
-            let port = v["port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(0);
-            sharing::open_k8s(msg.name, v["ip"].as_str().unwrap_or_default().to_owned(), port, v["label"].as_str().unwrap_or_default().to_owned(), v["name"].as_str().unwrap_or_default().to_owned());
+            let port = v["port"]
+                .as_u64()
+                .and_then(|p| u16::try_from(p).ok())
+                .unwrap_or(0);
+            sharing::open_k8s(
+                msg.name,
+                v["ip"].as_str().unwrap_or_default().to_owned(),
+                port,
+                v["label"].as_str().unwrap_or_default().to_owned(),
+                v["name"].as_str().unwrap_or_default().to_owned(),
+            );
             Ok(())
         }
         "shareusage" => {
@@ -1696,7 +2227,11 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             match msg.name.as_str() {
                 // A selection can be a whole screen of output.
                 "copy" => {
-                    if let Some(text) = msg.value.as_str().filter(|t| !t.is_empty() && t.len() <= termwire::COPY_MAX) {
+                    if let Some(text) = msg
+                        .value
+                        .as_str()
+                        .filter(|t| !t.is_empty() && t.len() <= termwire::COPY_MAX)
+                    {
                         window::copy(text);
                     }
                 }
@@ -1757,12 +2292,18 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             let (builder, id) = (msg.name, msg.id);
             std::thread::spawn(move || {
                 if let Err(e) = crate::builds::remove(&builder, &id) {
-                    emit(notice("error", &trf("Couldn't remove the build: {error}", &[("error", &e)])));
+                    emit(notice(
+                        "error",
+                        &trf("Couldn't remove the build: {error}", &[("error", &e)]),
+                    ));
                 }
-                emit(match crate::builds::list() {
-                    Ok(b) => serde_json::json!({"type": "builds", "builds": b}),
-                    Err(e) => serde_json::json!({"type": "builds", "error": e.to_string()}),
-                }.to_string())
+                emit(
+                    match crate::builds::list() {
+                        Ok(b) => serde_json::json!({"type": "builds", "builds": b}),
+                        Err(e) => serde_json::json!({"type": "builds", "error": e.to_string()}),
+                    }
+                    .to_string(),
+                )
             });
             Ok(())
         }
@@ -1779,7 +2320,9 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let e = match client::request("POST", "/build/prune?all=1", None) {
-                    Ok(r) if r.ok() => serde_json::json!({"type": "buildpruned", "freed": r.json()["SpaceReclaimed"]}),
+                    Ok(r) if r.ok() => {
+                        serde_json::json!({"type": "buildpruned", "freed": r.json()["SpaceReclaimed"]})
+                    }
                     Ok(r) => serde_json::json!({"type": "buildpruned", "error": r.error()}),
                     Err(e) => serde_json::json!({"type": "buildpruned", "error": e.to_string()}),
                 };
@@ -1797,7 +2340,13 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
                     match crate::buildwith::choose(with) {
                         // Kiri's builder made now if it wasn't yet; it takes the choice.
                         Ok(()) => setup::ensure_builder(),
-                        Err(e) => emit(notice("error", &trf("Couldn't change which builder docker build uses: {error}", &[("error", &e)]))),
+                        Err(e) => emit(notice(
+                            "error",
+                            &trf(
+                                "Couldn't change which builder docker build uses: {error}",
+                                &[("error", &e)],
+                            ),
+                        )),
                     }
                 }
                 emit(crate::buildwith::event());
@@ -1806,7 +2355,12 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         // Settings → Import, from OrbStack or Docker Desktop.
         "importsources" => {
-            std::thread::spawn(|| emit(serde_json::json!({"type": "importsources", "sources": import::sources()}).to_string()));
+            std::thread::spawn(|| {
+                emit(
+                    serde_json::json!({"type": "importsources", "sources": import::sources()})
+                        .to_string(),
+                )
+            });
             Ok(())
         }
         "inventory" => {
@@ -1817,7 +2371,9 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
                         v["type"] = "inventory".into();
                         v
                     }
-                    Err(e) => serde_json::json!({"type": "inventory", "source": source, "error": e.to_string()}),
+                    Err(e) => {
+                        serde_json::json!({"type": "inventory", "source": source, "error": e.to_string()})
+                    }
                 };
                 emit(event.to_string());
             });
@@ -1827,8 +2383,17 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             let (source, picked, tx) = (msg.name, msg.value, tx.clone());
             std::thread::spawn(move || {
                 let (mut done, mut failed) = (0, 0);
-                for (kind, f) in [("images", import::image as fn(&str, &str) -> io::Result<()>), ("volumes", import::volume), ("containers", import::container)] {
-                    for name in picked[kind].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+                for (kind, f) in [
+                    ("images", import::image as fn(&str, &str) -> io::Result<()>),
+                    ("volumes", import::volume),
+                    ("containers", import::container),
+                ] {
+                    for name in picked[kind]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                    {
                         emit(serde_json::json!({"type": "importstep", "kind": kind, "name": name, "state": "running"}).to_string());
                         match f(&source, name) {
                             Ok(()) => {
@@ -1842,7 +2407,10 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
                         }
                     }
                 }
-                emit(serde_json::json!({"type": "importdone", "done": done, "failed": failed}).to_string());
+                emit(
+                    serde_json::json!({"type": "importdone", "done": done, "failed": failed})
+                        .to_string(),
+                );
                 let _ = tx.send(Cmd::Refresh);
             });
             Ok(())
@@ -1880,10 +2448,17 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         "restartvm" => {
             std::thread::spawn(|| {
                 let _op = diag::enter_op(diag::new_op("restartvm"));
-                let result = expect_ok(client::request("POST", "/kiri/sleep", None)).and_then(|()| expect_ok(client::request("POST", "/kiri/wake", None)));
+                let result = expect_ok(client::request("POST", "/kiri/sleep", None))
+                    .and_then(|()| expect_ok(client::request("POST", "/kiri/wake", None)));
                 match result {
-                    Ok(()) => emit(notice("ok", &tr("The Linux VM restarted with the new resources"))),
-                    Err(e) => emit(notice("error", &trf("Could not restart the VM: {error}", &[("error", &e)]))),
+                    Ok(()) => emit(notice(
+                        "ok",
+                        &tr("The Linux VM restarted with the new resources"),
+                    )),
+                    Err(e) => emit(notice(
+                        "error",
+                        &trf("Could not restart the VM: {error}", &[("error", &e)]),
+                    )),
                 }
                 resources(None);
             });
@@ -1918,8 +2493,16 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             Ok(())
         }
         // Signing in through the registry's own page (Pull from's Sign in).
-        "weblogin" | "webloginopen" | "webloginmfa" | "webloginsso" | "weblogincancel" | "awsprofiles" => {
-            weblogin::handle(&msg.cmd, msg.name, &msg.value, emit, ensure_daemon, term::captured);
+        "weblogin" | "webloginopen" | "webloginmfa" | "webloginsso" | "weblogincancel"
+        | "awsprofiles" => {
+            weblogin::handle(
+                &msg.cmd,
+                msg.name,
+                &msg.value,
+                emit,
+                ensure_daemon,
+                term::captured,
+            );
             Ok(())
         }
         // Before Run: what the image's start script won't start without.
@@ -1947,7 +2530,10 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         "terminal" => {
             if let Err(e) = detail::terminal(&msg.name) {
-                emit(notice("error", &trf("Could not open Terminal: {error}", &[("error", &e)])));
+                emit(notice(
+                    "error",
+                    &trf("Could not open Terminal: {error}", &[("error", &e)]),
+                ));
             }
             Ok(())
         }
@@ -1962,10 +2548,22 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         "download" => {
             match detail::download(&msg.name, &msg.path) {
                 Ok(to) => {
-                    emit(notice("ok", &trf("Saved to Downloads as {file}", &[("file", &to.file_name().unwrap_or_default().to_string_lossy())])));
+                    emit(notice(
+                        "ok",
+                        &trf(
+                            "Saved to Downloads as {file}",
+                            &[(
+                                "file",
+                                &to.file_name().unwrap_or_default().to_string_lossy(),
+                            )],
+                        ),
+                    ));
                     reveal(&to);
                 }
-                Err(e) => emit(notice("error", &trf("Could not save the file: {error}", &[("error", &e)]))),
+                Err(e) => emit(notice(
+                    "error",
+                    &trf("Could not save the file: {error}", &[("error", &e)]),
+                )),
             }
             Ok(())
         }
@@ -1977,10 +2575,33 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         // Only the container's own addresses: a page cannot open arbitrary URLs.
         "open" => {
-            let local = msg.name.strip_prefix("http://").or_else(|| msg.name.strip_prefix("https://")).and_then(|r| r.split(['/', ':']).next()).is_some_and(|h| h == "localhost" || h.ends_with(".kiri.localhost") || h.ends_with(".kiri.local"));
+            let local = msg
+                .name
+                .strip_prefix("http://")
+                .or_else(|| msg.name.strip_prefix("https://"))
+                .and_then(|r| r.split(['/', ':']).next())
+                .is_some_and(|h| {
+                    h == "localhost" || h.ends_with(".kiri.localhost") || h.ends_with(".kiri.local")
+                });
             // A build warning's rule page (docs.docker.com/go/dockerfile/rule/…).
-            let docs = msg.name.strip_prefix("https://docs.docker.com/go/").is_some_and(|rest| rest.bytes().all(|b| b.is_ascii_alphanumeric() || b"-/".contains(&b)));
-            if local || docs || msg.name == "https://runkiri.com" || msg.name == "https://runkiri.com/share/notice" || msg.name == "https://canestack.com" || msg.name == "https://github.com/libracoder/kiri/issues/new" || msg.name == "https://github.com/libracoder/kiri" || msg.name == "https://github.com/anchore/grype" || msg.name == "https://login.docker.com/activate" || msg.name == "https://github.com/login/device" {
+            let docs = msg
+                .name
+                .strip_prefix("https://docs.docker.com/go/")
+                .is_some_and(|rest| {
+                    rest.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-/".contains(&b))
+                });
+            if local
+                || docs
+                || msg.name == "https://runkiri.com"
+                || msg.name == "https://runkiri.com/share/notice"
+                || msg.name == "https://canestack.com"
+                || msg.name == "https://github.com/libracoder/kiri/issues/new"
+                || msg.name == "https://github.com/libracoder/kiri"
+                || msg.name == "https://github.com/anchore/grype"
+                || msg.name == "https://login.docker.com/activate"
+                || msg.name == "https://github.com/login/device"
+            {
                 open(&msg.name);
             }
             Ok(())
@@ -2014,14 +2635,20 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         // logs folder in Finder.
         "diaglogs" => {
             let (part, op) = (msg.name, msg.id);
-            let (errors, n) = (msg.value["errors"] == true, msg.value["n"].as_u64().unwrap_or(200) as usize);
-            std::thread::spawn(move || emit(diag::report::page_lines(&part, errors, &op, n).to_string()));
+            let (errors, n) = (
+                msg.value["errors"] == true,
+                msg.value["n"].as_u64().unwrap_or(200) as usize,
+            );
+            std::thread::spawn(move || {
+                emit(diag::report::page_lines(&part, errors, &op, n).to_string())
+            });
             Ok(())
         }
         "diagreport" => {
             let containers = msg.value["containers"] == true;
             std::thread::spawn(move || {
-                let saved = diag::report::report_text(containers).and_then(|text| diag::report::save_report(&text, None));
+                let saved = diag::report::report_text(containers)
+                    .and_then(|text| diag::report::save_report(&text, None));
                 emit(match saved {
                     Ok(path) => {
                         diag::report::reveal(&path);
@@ -2036,17 +2663,27 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             let containers = msg.value["containers"] == true;
             std::thread::spawn(move || {
                 let _op = diag::enter_op(diag::new_op("diagsend"));
-                let sent = diag::report::report_text(containers).and_then(|text| diag::report::send("report", diag::Part::Ui, std::time::SystemTime::now(), &text));
-                emit(match sent {
-                    Ok(id) => {
-                        diag::info!("report sent", id = id);
-                        serde_json::json!({"type": "diagsend", "id": id})
+                let sent = diag::report::report_text(containers).and_then(|text| {
+                    diag::report::send(
+                        "report",
+                        diag::Part::Ui,
+                        std::time::SystemTime::now(),
+                        &text,
+                    )
+                });
+                emit(
+                    match sent {
+                        Ok(id) => {
+                            diag::info!("report sent", id = id);
+                            serde_json::json!({"type": "diagsend", "id": id})
+                        }
+                        Err(e) => {
+                            diag::warn!("report not sent", error = e);
+                            serde_json::json!({"type": "diagsend", "error": e.to_string()})
+                        }
                     }
-                    Err(e) => {
-                        diag::warn!("report not sent", error = e);
-                        serde_json::json!({"type": "diagsend", "error": e.to_string()})
-                    }
-                }.to_string())
+                    .to_string(),
+                )
             });
             Ok(())
         }
@@ -2110,7 +2747,11 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             recheck::start(|| feed_check(false));
             ask_language();
             // The first time the app opens: ask, once, whether to use *.kiri.local (the Mac only, so far).
-            if cfg!(target_os = "macos") && !crate::flavor::dev() && !crate::daemon::dns::installed() && prefs()["domainsAsked"] != true {
+            if cfg!(target_os = "macos")
+                && !crate::flavor::dev()
+                && !crate::daemon::dns::installed()
+                && prefs()["domainsAsked"] != true
+            {
                 set_pref("domainsAsked", true.into());
                 emit(r#"{"type":"welcome"}"#.to_owned());
             }
@@ -2138,7 +2779,11 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
             // isn't running) but doesn't wake it: asleep, it reads Ready, and the
             // next docker command or action wakes it. One someone stopped waits
             // for Start.
-            if autostart && !engine_stopped() { tx.send(Cmd::Connect) } else { Ok(()) }
+            if autostart && !engine_stopped() {
+                tx.send(Cmd::Connect)
+            } else {
+                Ok(())
+            }
         }
         // The Linux setup checklist: check again, fix one or "all", open the
         // window once it's ready, or sign in again for the group to apply.
@@ -2154,7 +2799,12 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
                 let result = linux::onboarding::fix(&what);
                 let mut checks = linux::onboarding::checks();
                 if let Err(e) = result {
-                    diag::warn!("action failed", action = "onboarding fix", target = what, error = e);
+                    diag::warn!(
+                        "action failed",
+                        action = "onboarding fix",
+                        target = what,
+                        error = e
+                    );
                     checks["error"] = e.to_string().into();
                 }
                 emit(checks.to_string());
@@ -2176,7 +2826,11 @@ fn handle(text: &str, tx: &Sender<Cmd>, autostart: bool, view: Option<&str>) {
         }
         #[cfg(target_os = "linux")]
         "onblogout" | "onbrestart" => {
-            let result = if msg.cmd == "onblogout" { linux::onboarding::log_out() } else { linux::onboarding::restart() };
+            let result = if msg.cmd == "onblogout" {
+                linux::onboarding::log_out()
+            } else {
+                linux::onboarding::restart()
+            };
             if let Err(e) = result {
                 emit(notice("error", &e.to_string()));
             }

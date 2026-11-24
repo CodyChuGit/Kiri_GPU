@@ -31,7 +31,7 @@
 
 use std::cell::Cell;
 
-use super::{Cond, Op, JEQ_K, JGE_K, JGT_K, OFF_ARGS};
+use super::{Cond, JEQ_K, JGE_K, JGT_K, OFF_ARGS, Op};
 
 /// Which part of a rule's last condition an action stands for.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -90,7 +90,26 @@ struct Node {
 
 impl Node {
     fn new() -> Node {
-        Node { arg: 0, high: false, op: Cmp::Eq, orig: Op::Eq, mask: 0, datum: 0, full: 0, act_t_flg: false, act_f_flg: false, act_t: 0, act_f: 0, who_t: NOBODY, who_f: NOBODY, prv: None, nxt: None, t: None, f: None, refs: 0 }
+        Node {
+            arg: 0,
+            high: false,
+            op: Cmp::Eq,
+            orig: Op::Eq,
+            mask: 0,
+            datum: 0,
+            full: 0,
+            act_t_flg: false,
+            act_f_flg: false,
+            act_t: 0,
+            act_f: 0,
+            who_t: NOBODY,
+            who_f: NOBODY,
+            prv: None,
+            nxt: None,
+            t: None,
+            f: None,
+            refs: 0,
+        }
     }
 }
 
@@ -220,7 +239,8 @@ impl Db {
         let start = n;
         let mut cur = Some(n);
         while let Some(i) = cur.filter(|_| self.tick()) {
-            let links = u32::from(self.nodes[i].prv.is_some()) + u32::from(self.nodes[i].nxt.is_some());
+            let links =
+                u32::from(self.nodes[i].prv.is_some()) + u32::from(self.nodes[i].nxt.is_some());
             if self.nodes[i].refs > links as i32 {
                 return 0;
             }
@@ -258,7 +278,12 @@ impl Db {
             return 0;
         }
         let mut cnt = 0;
-        let (mut lvl_p, mut lvl_n, mut nxt_t, mut nxt_f) = (self.nodes[n].prv, self.nodes[n].nxt, self.nodes[n].t, self.nodes[n].f);
+        let (mut lvl_p, mut lvl_n, mut nxt_t, mut nxt_f) = (
+            self.nodes[n].prv,
+            self.nodes[n].nxt,
+            self.nodes[n].t,
+            self.nodes[n].f,
+        );
         if let Some(p) = lvl_p {
             self.nodes[p].nxt = None;
         }
@@ -287,7 +312,9 @@ impl Db {
 
     /// `_db_tree_remove`
     fn tree_remove(&mut self, tree: Slot, node: usize) -> u32 {
-        let Some(mut c) = self.slot(tree) else { return 0 };
+        let Some(mut c) = self.slot(tree) else {
+            return 0;
+        };
         while let Some(p) = self.nodes[c].prv.filter(|_| self.tick()) {
             c = p;
         }
@@ -350,7 +377,9 @@ impl Db {
         let mut cnt = 0;
         let mut state_new = *state;
         'ret: {
-            let (Some(first), Some(n)) = (existing, new) else { break 'ret };
+            let (Some(first), Some(n)) = (existing, new) else {
+                break 'ret;
+            };
             if state.flags & MATCHSET == MATCH_ONCE {
                 break 'ret;
             }
@@ -376,13 +405,21 @@ impl Db {
                         }
                         {
                             let (xn, nn) = (&self.nodes[x], &self.nodes[n]);
-                            if (xn.act_t_flg || xn.t.is_some()) && !(nn.act_t_flg || nn.t.is_some()) {
+                            if (xn.act_t_flg || xn.t.is_some()) && !(nn.act_t_flg || nn.t.is_some())
+                            {
                                 break 'ret;
                             }
-                            if (xn.act_f_flg || xn.f.is_some()) && !(nn.act_f_flg || nn.f.is_some()) {
+                            if (xn.act_f_flg || xn.f.is_some()) && !(nn.act_f_flg || nn.f.is_some())
+                            {
                                 break 'ret;
                             }
-                            if state_new.flags & N_FINISHED != 0 && state_new.flags & X_FINISHED != 0 && (nn.act_t_flg != xn.act_t_flg || nn.act_t != xn.act_t || nn.act_f_flg != xn.act_f_flg || nn.act_f != xn.act_f) {
+                            if state_new.flags & N_FINISHED != 0
+                                && state_new.flags & X_FINISHED != 0
+                                && (nn.act_t_flg != xn.act_t_flg
+                                    || nn.act_t != xn.act_t
+                                    || nn.act_f_flg != xn.act_f_flg
+                                    || nn.act_f != xn.act_f)
+                            {
                                 break 'ret;
                             }
                         }
@@ -417,13 +454,21 @@ impl Db {
                             }
                         }
                         let ok = self.act_check(x_iter, state_new.action).is_ok();
-                        if ok && state_new.flags & MATCH != 0 && state_new.flags & N_FINISHED != 0 && state_new.flags & X_PREFIX != 0 {
+                        if ok
+                            && state_new.flags & MATCH != 0
+                            && state_new.flags & N_FINISHED != 0
+                            && state_new.flags & X_PREFIX != 0
+                        {
                             let Some(xr) = x_iter else { break 'ret };
                             cnt += self.tree_remove(Slot::Chains, xr);
                             if self.chains.is_none() {
                                 break 'ret;
                             }
-                        } else if ok && state_new.flags & MATCH != 0 && state_new.flags & X_FINISHED != 0 && state_new.flags & N_PREFIX != 0 {
+                        } else if ok
+                            && state_new.flags & MATCH != 0
+                            && state_new.flags & X_FINISHED != 0
+                            && state_new.flags & N_PREFIX != 0
+                        {
                             break 'ret;
                         }
                     } else if self.lt(x, n) {
@@ -432,7 +477,11 @@ impl Db {
                         }
                         for tf in [true, false] {
                             let Some(xi) = x_iter else { break };
-                            let sub = if tf { self.nodes[xi].t } else { self.nodes[xi].f };
+                            let sub = if tf {
+                                self.nodes[xi].t
+                            } else {
+                                self.nodes[xi].f
+                            };
                             if sub.is_none() {
                                 continue;
                             }
@@ -617,12 +666,21 @@ impl Db {
         let mut op_prev = Op::Eq;
         let mut last: Option<[Option<usize>; 3]> = None;
         for c in conds {
-            let (mask, datum) = if c.op == Op::MaskedEq { (c.value, c.datum) } else { (u64::MAX, c.value) };
+            let (mask, datum) = if c.op == Op::MaskedEq {
+                (c.value, c.datum)
+            } else {
+                (u64::MAX, c.value)
+            };
             // A mask of nothing tests nothing.
             if c.op == Op::MaskedEq && mask == 0 {
                 continue;
             }
-            let (mh, ml, dh, dl) = ((mask >> 32) as u32, mask as u32, (datum >> 32) as u32, datum as u32);
+            let (mh, ml, dh, dl) = (
+                (mask >> 32) as u32,
+                mask as u32,
+                (datum >> 32) as u32,
+                datum as u32,
+            );
             let mk = |high: bool, op: Cmp, m: u32, d: u32| {
                 let mut n = Node::new();
                 n.arg = c.index;
@@ -636,7 +694,11 @@ impl Db {
             };
             let it: [Option<usize>; 3] = match c.op {
                 Op::Gt | Op::Ge | Op::Le | Op::Lt => {
-                    let lo = if matches!(c.op, Op::Gt | Op::Le) { Cmp::Gt } else { Cmp::Ge };
+                    let lo = if matches!(c.op, Op::Gt | Op::Le) {
+                        Cmp::Gt
+                    } else {
+                        Cmp::Ge
+                    };
                     let a = self.alloc(mk(true, Cmp::Gt, mh, dh));
                     let b = self.alloc(mk(true, Cmp::Eq, mh, dh));
                     let l = self.alloc(mk(false, lo, ml, dl));
@@ -647,7 +709,11 @@ impl Db {
                     [Some(a), Some(b), Some(l)]
                 }
                 Op::Eq | Op::MaskedEq | Op::Ne => {
-                    let op = if c.op == Op::MaskedEq { Cmp::MaskedEq } else { Cmp::Eq };
+                    let op = if c.op == Op::MaskedEq {
+                        Cmp::MaskedEq
+                    } else {
+                        Cmp::Eq
+                    };
                     let a = self.alloc(mk(true, op, mh, dh));
                     let b = self.alloc(mk(false, op, ml, dl));
                     let v = self.get(Some(b));
@@ -688,7 +754,9 @@ impl Db {
             op_prev = c.op;
             last = Some(it);
         }
-        let Some(it) = last else { return Fresh { chains: None } };
+        let Some(it) = last else {
+            return Fresh { chains: None };
+        };
         let (a, b, l) = (need!(it[0]), need!(it[1]), it[2]);
         match op_prev {
             Op::Gt | Op::Ge => {
@@ -740,7 +808,9 @@ impl Db {
     /// runc does). Err is EEXIST, or a tree libseccomp would never finish.
     pub fn add(&mut self, rule: usize, action: u32, conds: &[Cond]) -> Result<(), ()> {
         let mut new = self.chain(conds, action, rule);
-        let Some(first) = new.chains else { return Err(()) };
+        let Some(first) = new.chains else {
+            return Err(());
+        };
         if !self.started {
             self.started = true;
             self.chains = new.chains;
@@ -859,7 +929,11 @@ impl Db {
     /// Where a node goes when its test holds (`t`) or does not.
     pub fn branch(&self, i: usize, t: bool) -> Branch {
         let n = &self.nodes[i];
-        let (next, flg, act, who) = if t { (n.t, n.act_t_flg, n.act_t, n.who_t) } else { (n.f, n.act_f_flg, n.act_f, n.who_f) };
+        let (next, flg, act, who) = if t {
+            (n.t, n.act_t_flg, n.act_t, n.who_t)
+        } else {
+            (n.f, n.act_f_flg, n.act_f, n.who_f)
+        };
         match next {
             Some(c) => Branch::Level(self.level_start(c)),
             None if flg => Branch::Act(act, who),

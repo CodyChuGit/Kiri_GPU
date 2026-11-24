@@ -180,6 +180,7 @@ struct HostApplied {
     groups: Vec<String>,
     nodes: Vec<super::hostopts::Node>,
     cdi: super::cdi::Cdi,
+    oom_score_adj: Option<i32>,
 }
 
 /// Docker's default capability set as a mask.
@@ -191,19 +192,33 @@ fn default_caps() -> u64 {
 enum ChildStdio {
     /// The child makes a pty inside its own /dev and sends the master back.
     Tty { sock: OwnedFd },
-    Pipes { stdin: Option<OwnedFd>, stdout: OwnedFd, stderr: OwnedFd },
+    Pipes {
+        stdin: Option<OwnedFd>,
+        stdout: OwnedFd,
+        stderr: OwnedFd,
+    },
 }
 
 /// The agent's ends.
 enum ParentStdio {
-    Tty { sock: OwnedFd },
-    Pipes { stdin: Option<OwnedFd>, stdout: OwnedFd, stderr: OwnedFd },
+    Tty {
+        sock: OwnedFd,
+    },
+    Pipes {
+        stdin: Option<OwnedFd>,
+        stdout: OwnedFd,
+        stderr: OwnedFd,
+    },
 }
 
 /// What the child said before it ended, if it could not start (see
 /// `sys::child_fail`): read from where it reports, without waiting.
 fn child_report(fd: RawFd) -> Option<String> {
-    let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    let mut ready = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
     // SAFETY: one valid pollfd, no wait.
     if unsafe { libc::poll(&mut ready, 1, 0) } != 1 || ready.revents & libc::POLLIN == 0 {
         return None;
@@ -219,13 +234,19 @@ fn child_report(fd: RawFd) -> Option<String> {
 
 /// The reason in a child's "kiri: cannot start container: <reason>" line.
 fn start_failure(said: &str) -> Option<&str> {
-    said.lines().find_map(|l| l.strip_prefix("kiri: cannot start container: ")).map(str::trim).filter(|why| !why.is_empty())
+    said.lines()
+        .find_map(|l| l.strip_prefix("kiri: cannot start container: "))
+        .map(str::trim)
+        .filter(|why| !why.is_empty())
 }
 
 fn stdio(p: &Prepared) -> io::Result<(ParentStdio, ChildStdio)> {
     if p.tty {
         let (parent, child) = sys::socketpair()?;
-        return Ok((ParentStdio::Tty { sock: parent }, ChildStdio::Tty { sock: child }));
+        return Ok((
+            ParentStdio::Tty { sock: parent },
+            ChildStdio::Tty { sock: child },
+        ));
     }
     let (out_r, out_w) = sys::pipe()?;
     let (err_r, err_w) = sys::pipe()?;
@@ -237,24 +258,41 @@ fn stdio(p: &Prepared) -> io::Result<(ParentStdio, ChildStdio)> {
         (None, None)
     };
     Ok((
-        ParentStdio::Pipes { stdin: in_w, stdout: out_r, stderr: err_r },
-        ChildStdio::Pipes { stdin: in_r, stdout: out_w, stderr: err_w },
+        ParentStdio::Pipes {
+            stdin: in_w,
+            stdout: out_r,
+            stderr: err_r,
+        },
+        ChildStdio::Pipes {
+            stdin: in_r,
+            stdout: out_w,
+            stderr: err_w,
+        },
     ))
 }
 
 /// After clone: collect the agent's ends. For a TTY this waits for the child
 /// to send the pty master, or the reason it could not.
-fn finish_stdio(parent: ParentStdio, child: ChildStdio) -> io::Result<(Option<OwnedFd>, Option<OwnedFd>, Option<OwnedFd>)> {
+fn finish_stdio(
+    parent: ParentStdio,
+    child: ChildStdio,
+) -> io::Result<(Option<OwnedFd>, Option<OwnedFd>, Option<OwnedFd>)> {
     drop(child);
     match parent {
-        ParentStdio::Pipes { stdin, stdout, stderr } => Ok((stdin, Some(stdout), Some(stderr))),
+        ParentStdio::Pipes {
+            stdin,
+            stdout,
+            stderr,
+        } => Ok((stdin, Some(stdout), Some(stderr))),
         ParentStdio::Tty { sock } => match sys::recv_fd(sock.as_raw_fd())? {
             Received::Fd(master) => {
                 sys::set_nonblocking(master.as_raw_fd())?;
                 let input = master.try_clone()?;
                 Ok((Some(input), Some(master), None))
             }
-            Received::Message(m) if m.is_empty() => Err(io::Error::other("container exited before its terminal was ready")),
+            Received::Message(m) if m.is_empty() => Err(io::Error::other(
+                "container exited before its terminal was ready",
+            )),
             Received::Message(m) => Err(io::Error::other(m)),
         },
     }
@@ -262,7 +300,10 @@ fn finish_stdio(parent: ParentStdio, child: ChildStdio) -> io::Result<(Option<Ow
 
 pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<Process> {
     if spec.argv.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no command to run"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no command to run",
+        ));
     }
     let layers: Vec<&str> = spec.layers.iter().collect();
     let rootfs = super::roots::acquire(paths, spec.id, &layers)?;
@@ -270,7 +311,11 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
 
     let cgroup = paths.cgroup.join(spec.id);
     let remove = spec.flags & run_flags::REMOVE != 0;
-    let undo = Teardown { base: base.clone(), cgroup: cgroup.clone(), remove };
+    let undo = Teardown {
+        base: base.clone(),
+        cgroup: cgroup.clone(),
+        remove,
+    };
     // A restart that fails must not take the stopped container's files with it.
     let cleanup = |e: io::Error| {
         undo_now(&undo, remove);
@@ -288,8 +333,16 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     }
     let cgroup_fd = fs::File::open(&cgroup).map_err(cleanup)?;
     let mut host = super::hostopts::parse(spec.opts).map_err(cleanup)?;
-    if spec.flags & run_flags::NET_HOST != 0 && host.sysctls.iter().any(|s| s.ns == super::hostopts::Ns::Net) {
-        return Err(cleanup(io::Error::new(io::ErrorKind::InvalidInput, "net.* sysctls are not allowed in the host network namespace")));
+    if spec.flags & run_flags::NET_HOST != 0
+        && host
+            .sysctls
+            .iter()
+            .any(|s| s.ns == super::hostopts::Ns::Net)
+    {
+        return Err(cleanup(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "net.* sysctls are not allowed in the host network namespace",
+        )));
     }
     // `--device` nodes are looked up now, so a missing one fails the start.
     let (nodes, device_rules) = super::hostopts::resolve_devices(&host).map_err(cleanup)?;
@@ -304,7 +357,16 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
             }
         };
 
-    let mut prepared = prepare(spec.argv, spec.env, spec.cwd, spec.user, Some(spec.hostname), spec.flags, spec.caps).map_err(cleanup)?;
+    let mut prepared = prepare(
+        spec.argv,
+        spec.env,
+        spec.cwd,
+        spec.user,
+        Some(spec.hostname),
+        spec.flags,
+        spec.caps,
+    )
+    .map_err(cleanup)?;
     if !device_filtered {
         prepared.caps &= !(1 << super::devices::CAP_MKNOD);
     }
@@ -317,29 +379,49 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     if spec.limits.shm_size > 0 {
         prepared.shm_size = spec.limits.shm_size;
     }
-    prepared.domainname = net_opts::values(spec.net.opts, net_opts::DOMAINNAME).next().filter(|d| !d.is_empty()).map(|d| d.as_bytes().to_vec());
+    prepared.domainname = net_opts::values(spec.net.opts, net_opts::DOMAINNAME)
+        .next()
+        .filter(|d| !d.is_empty())
+        .map(|d| d.as_bytes().to_vec());
     let mut netns = 0;
     if let Some(target) = net_opts::values(spec.net.opts, net_opts::NETNS).next() {
-        let pid = net.join_pid.ok_or_else(|| cleanup(io::Error::other(format!("cannot join network of a non running container: {target}"))))?;
+        let pid = net.join_pid.ok_or_else(|| {
+            cleanup(io::Error::other(format!(
+                "cannot join network of a non running container: {target}"
+            )))
+        })?;
         let joined = fs::File::open(format!("/proc/{pid}/ns/net")).map_err(cleanup)?;
         netns = netns_inode(&joined);
         prepared.net_join = Some(joined);
     }
-    prepared.host = HostApplied { rlimits: host.rlimits.clone(), groups: host.groups.clone(), nodes, cdi: host.cdi.clone() };
+    prepared.host = HostApplied {
+        rlimits: host.rlimits.clone(),
+        groups: host.groups.clone(),
+        nodes,
+        cdi: host.cdi.clone(),
+        oom_score_adj: host.oom_score_adj,
+    };
     // Small, short-lived files: kept in memory (/run is tmpfs), not on the data disk.
     let etc_dir = PathBuf::from("/run/kiri").join(spec.id);
     let embedded_dns = embedded_dns(spec, net.upstream_dns, net.dns.relay);
     let nameserver = embedded_dns.then(|| embedded_address(spec, net.dns.relay));
-    prepared.etc_files = write_etc_files(spec, &etc_dir, net.upstream_dns, nameserver).map_err(cleanup)?;
+    prepared.etc_files =
+        write_etc_files(spec, &etc_dir, net.upstream_dns, nameserver).map_err(cleanup)?;
     // CDI's disable-device-node-modification: the driver reads its
     // parameters here, and with ModifyDeviceFiles 0 it leaves the
     // container's device nodes as they were given.
     if host.cdi.no_modify
-        && let Some(text) = fs::read_to_string("/proc/driver/nvidia/params").ok().as_deref().and_then(super::cdi::nvidia_params)
+        && let Some(text) = fs::read_to_string("/proc/driver/nvidia/params")
+            .ok()
+            .as_deref()
+            .and_then(super::cdi::nvidia_params)
     {
         let src = etc_dir.join("nvidia-params");
         fs::write(&src, text).map_err(cleanup)?;
-        prepared.etc_files.push((sys::cstr(&src).map_err(cleanup)?, CString::new("proc/driver/nvidia/params").expect("no NUL")));
+        prepared.etc_files.push((
+            sys::cstr(&src).map_err(cleanup)?,
+            CString::new("proc/driver/nvidia/params").expect("no NUL"),
+        ));
     }
     prepared.mounts = parse_mounts(spec.mounts).map_err(cleanup)?;
     // A network namespace of its own gets Docker's two defaults: any port
@@ -348,7 +430,9 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     if spec.flags & run_flags::NET_HOST == 0 && prepared.net_join.is_none() {
         super::hostopts::add_net_defaults(&mut host.sysctls);
     }
-    let bridged = !spec.net.bridge.is_empty() && spec.flags & (run_flags::NET_HOST | run_flags::NET_NONE) == 0 && prepared.net_join.is_none();
+    let bridged = !spec.net.bridge.is_empty()
+        && spec.flags & (run_flags::NET_HOST | run_flags::NET_NONE) == 0
+        && prepared.net_join.is_none();
     let mut go = None;
     // Sysctls are written from here once the namespaces exist: the child
     // waits for that as it does for its network.
@@ -365,14 +449,22 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     let (parent_io, child_io) = stdio(&prepared).map_err(cleanup)?;
     let rootfs_c = sys::cstr(&rootfs).map_err(cleanup)?;
 
-    let mut flags = (libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWCGROUP) as u64 | CLONE_INTO_CGROUP;
+    let mut flags =
+        (libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWCGROUP)
+            as u64
+            | CLONE_INTO_CGROUP;
     if !prepared.ipc_host {
         flags |= libc::CLONE_NEWIPC as u64;
     }
     if spec.flags & run_flags::NET_HOST == 0 && prepared.net_join.is_none() {
         flags |= libc::CLONE_NEWNET as u64;
     }
-    let args = CloneArgs { flags, exit_signal: libc::SIGCHLD as u64, cgroup: cgroup_fd.as_raw_fd() as u64, ..Default::default() };
+    let args = CloneArgs {
+        flags,
+        exit_signal: libc::SIGCHLD as u64,
+        cgroup: cgroup_fd.as_raw_fd() as u64,
+        ..Default::default()
+    };
 
     // SAFETY: the agent is single-threaded, as clone3 without CLONE_VM needs.
     let pid = unsafe { sys::clone3(&args) }.map_err(cleanup)?;
@@ -427,7 +519,9 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
         }
     };
     if got != 1 {
-        return Err(kill_child(io::Error::other("the container exited before its root was ready")));
+        return Err(kill_child(io::Error::other(
+            "the container exited before its root was ready",
+        )));
     }
     let mut veths = Vec::new();
     // Names, AAAA records and `--dns` servers to give the DNS server, once
@@ -450,17 +544,32 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
         static STARTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0xffff;
         let host_if = format!("kv{}{n:04x}", &spec.id[..spec.id.len().min(9)]);
-        let mac = net_opts::values(spec.net.opts, net_opts::MAC).next().and_then(net::parse_mac);
+        let mac = net_opts::values(spec.net.opts, net_opts::MAC)
+            .next()
+            .and_then(net::parse_mac);
         let v6 = net::Ip6::from_opts(spec.net.opts);
         let plug = net::Plug::from_opts(spec.net.opts);
-        net::attach_container(net.bridges, spec.net.bridge, &host_if, pid, spec.net.ip, spec.net.prefix, spec.net.gateway, mac, v6, plug)
-            .map_err(|e| kill_child(io::Error::new(e.kind(), format!("network: {e}"))))?;
+        net::attach_container(
+            net.bridges,
+            spec.net.bridge,
+            &host_if,
+            pid,
+            spec.net.ip,
+            spec.net.prefix,
+            spec.net.gateway,
+            mac,
+            v6,
+            plug,
+        )
+        .map_err(|e| kill_child(io::Error::new(e.kind(), format!("network: {e}"))))?;
         veths.push(host_if);
         if embedded_dns {
             // An IPv6-only network's bridge has no IPv4 address to serve on,
             // and its containers no A records.
             if !plug.no_ipv4 {
-                net.dns.serve(spec.net.bridge, spec.net.gateway).map_err(|e| kill_child(io::Error::new(e.kind(), format!("dns: {e}"))))?;
+                net.dns
+                    .serve(spec.net.bridge, spec.net.gateway)
+                    .map_err(|e| kill_child(io::Error::new(e.kind(), format!("dns: {e}"))))?;
             }
             // 127.0.0.11 in the container, when its resolv.conf names it. Not
             // when it names the gateway (the default bridge in the VM): the
@@ -477,8 +586,14 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
                     .map_err(|e| kill_child(io::Error::new(e.kind(), format!("dns: {e}"))))?;
             }
             // `--dns`: names the network does not know go to these instead.
-            let servers: Vec<[u8; 4]> = net_opts::values(spec.net.opts, net_opts::NAMESERVER).filter_map(net::parse_ip).collect();
-            names = Some(Names { v4: !plug.no_ipv4, v6: v6.map(|v| v.ip), servers });
+            let servers: Vec<[u8; 4]> = net_opts::values(spec.net.opts, net_opts::NAMESERVER)
+                .filter_map(net::parse_ip)
+                .collect();
+            names = Some(Names {
+                v4: !plug.no_ipv4,
+                v6: v6.map(|v| v.ip),
+                servers,
+            });
         }
         // Its 127.0.0.11 listener goes with it.
         super::hostopts::apply_sysctls(pid, &host.sysctls).map_err(|e| {
@@ -494,10 +609,12 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     })?;
     if let Some(Names { v4, v6, servers }) = names {
         if v4 {
-            net.dns.register(spec.net.bridge, spec.net.dns_names.iter(), spec.net.ip);
+            net.dns
+                .register(spec.net.bridge, spec.net.dns_names.iter(), spec.net.ip);
         }
         if let Some(ip) = v6 {
-            net.dns.register6(spec.net.bridge, spec.net.dns_names.iter(), spec.net.ip, ip);
+            net.dns
+                .register6(spec.net.bridge, spec.net.dns_names.iter(), spec.net.ip, ip);
         }
         net.dns.set_upstream(spec.net.ip, servers);
     }
@@ -509,11 +626,18 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
         stderr,
         stdin,
         tty: prepared.tty,
-        dns_entries: (bridged && embedded_dns).then(|| (spec.net.bridge.to_owned(), spec.net.ip)).into_iter().collect(),
+        dns_entries: (bridged && embedded_dns)
+            .then(|| (spec.net.bridge.to_owned(), spec.net.ip))
+            .into_iter()
+            .collect(),
         veths,
         netns,
         seccomp: spec.seccomp.to_vec(),
-        teardown: Some(Teardown { base, cgroup, remove }),
+        teardown: Some(Teardown {
+            base,
+            cgroup,
+            remove,
+        }),
     })
 }
 
@@ -551,7 +675,11 @@ fn plain_upper(base: &Path) -> io::Result<bool> {
 ///   features keeps the kernel's defaults, or its redirected directories and
 ///   metadata-only files would be refused (EPERM) after an update.
 fn overlay_features(plain: bool) -> &'static str {
-    if plain { "index=off,redirect_dir=nofollow,metacopy=off" } else { "index=off" }
+    if plain {
+        "index=off,redirect_dir=nofollow,metacopy=off"
+    } else {
+        "index=off"
+    }
 }
 
 /// Mounts a container's root: its image layers under its writable layer,
@@ -571,7 +699,10 @@ pub(super) fn mount_rootfs(paths: &Paths, id: &str, image_layers: &[&str]) -> io
     let mut seen = Vec::new();
     for digest in image_layers.iter() {
         if !layers::present(&paths.layers, digest) {
-            return Err(io::Error::new(io::ErrorKind::NotFound, format!("layer {digest} is not unpacked")));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("layer {digest} is not unpacked"),
+            ));
         }
         // An image can hold the same layer twice (often the empty one,
         // sha256:4f4fb700…), and the store keeps it once: overlayfs refuses
@@ -586,15 +717,34 @@ pub(super) fn mount_rootfs(paths: &Paths, id: &str, image_layers: &[&str]) -> io
         }
         lower.push_str(layers::hex(digest)?);
     }
-    let opts = format!("lowerdir={lower},upperdir={},workdir={},{}", upper.display(), work.display(), overlay_features(plain_upper(&base)?));
-    sys::mount(c"overlay", &sys::cstr(&rootfs)?, c"overlay", 0, Some(&CString::new(opts)?))?;
+    let opts = format!(
+        "lowerdir={lower},upperdir={},workdir={},{}",
+        upper.display(),
+        work.display(),
+        overlay_features(plain_upper(&base)?)
+    );
+    sys::mount(
+        c"overlay",
+        &sys::cstr(&rootfs)?,
+        c"overlay",
+        0,
+        Some(&CString::new(opts)?),
+    )?;
     Ok(rootfs)
 }
 
 /// Starts a process inside a running container: same namespaces, same cgroup.
-pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile: &[u8]) -> io::Result<Process> {
+pub fn exec(
+    spec: &ExecSpec<'_>,
+    target_pid: libc::pid_t,
+    paths: &Paths,
+    profile: &[u8],
+) -> io::Result<Process> {
     if spec.argv.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no command to run"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no command to run",
+        ));
     }
     valid_id(spec.exec_id)?;
     let ns = |name: &str| fs::File::open(format!("/proc/{target_pid}/ns/{name}"));
@@ -610,10 +760,18 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile
     let own_pid_ns = fs::File::open("/proc/self/ns/pid")?;
     let cgroup_fd = fs::File::open(paths.cgroup.join(spec.container_id))?;
 
-    let mut prepared = prepare(spec.argv, spec.env, spec.cwd, spec.user, None, spec.flags, spec.caps)?;
+    let mut prepared = prepare(
+        spec.argv, spec.env, spec.cwd, spec.user, None, spec.flags, spec.caps,
+    )?;
     // The container's ulimits and groups apply to its execs too, as with runc.
     let host = super::hostopts::parse(spec.opts)?;
-    prepared.host = HostApplied { rlimits: host.rlimits, groups: host.groups, nodes: Vec::new(), cdi: Default::default() };
+    prepared.host = HostApplied {
+        rlimits: host.rlimits,
+        groups: host.groups,
+        nodes: Vec::new(),
+        cdi: Default::default(),
+        oom_score_adj: host.oom_score_adj,
+    };
     // An exec runs under its container's profile, not the default.
     prepared.profile = profile.to_vec();
     let (parent_io, child_io) = stdio(&prepared)?;
@@ -635,15 +793,27 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile
     // moves its processes into sub-cgroups, after which its own cgroup takes
     // no processes. Join the one its init lives in, as runc does.
     let init_cgroup;
-    if cloned.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::ResourceBusy) {
+    if cloned
+        .as_ref()
+        .is_err_and(|e| e.kind() == io::ErrorKind::ResourceBusy)
+    {
         let rel = fs::read_to_string(format!("/proc/{target_pid}/cgroup")).unwrap_or_default();
-        let rel = rel.lines().find_map(|l| l.strip_prefix("0::")).unwrap_or("").trim_start_matches('/').to_owned();
+        let rel = rel
+            .lines()
+            .find_map(|l| l.strip_prefix("0::"))
+            .unwrap_or("")
+            .trim_start_matches('/')
+            .to_owned();
         init_cgroup = fs::File::open(std::path::Path::new("/sys/fs/cgroup").join(&rel));
         match &init_cgroup {
             Ok(fd) => {
-                let retry = CloneArgs { cgroup: fd.as_raw_fd() as u64, ..args };
+                let retry = CloneArgs {
+                    cgroup: fd.as_raw_fd() as u64,
+                    ..args
+                };
                 // SAFETY: as above.
-                cloned = unsafe { sys::clone3(&retry) }.map_err(|e| io::Error::new(e.kind(), format!("joining cgroup {rel}: {e}")));
+                cloned = unsafe { sys::clone3(&retry) }
+                    .map_err(|e| io::Error::new(e.kind(), format!("joining cgroup {rel}: {e}")));
             }
             Err(e) => cloned = Err(io::Error::new(e.kind(), format!("cgroup {rel}: {e}"))),
         }
@@ -682,7 +852,9 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile
 /// Whether the container's processes were killed for memory. Read before
 /// `teardown`, which removes the cgroup.
 pub fn oom_killed(p: &Process) -> bool {
-    p.teardown.as_ref().is_some_and(|t| super::cgroup::oom_killed(&t.cgroup))
+    p.teardown
+        .as_ref()
+        .is_some_and(|t| super::cgroup::oom_killed(&t.cgroup))
 }
 
 /// `netns_shared`: another live process still uses the container's network
@@ -741,8 +913,13 @@ pub const VOLUMES: &str = "/var/lib/kiri/volumes";
 
 pub fn remove_volume(name: &str) {
     // Docker's rule for volume names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
-    let valid = name.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
+    let valid = name
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b));
     if valid {
         // An NFS export or a host folder mounted there is not the volume's
         // to delete: unmount it first, and keep everything if that fails.
@@ -768,8 +945,14 @@ pub fn remove(paths: &Paths, id: &str) {
 /// deleted. Only containers of this data directory are touched: the
 /// cgroup and the network namespace may hold another engine's too.
 pub fn sweep(paths: &Paths, cgroup: &std::path::Path) {
-    let Ok(entries) = fs::read_dir(&paths.containers) else { return };
-    let ids: Vec<String> = entries.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|id| valid_id(id).is_ok() && id.len() >= 12).collect();
+    let Ok(entries) = fs::read_dir(&paths.containers) else {
+        return;
+    };
+    let ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|id| valid_id(id).is_ok() && id.len() >= 12)
+        .collect();
     for id in &ids {
         let cg = cgroup.join(id);
         if cg.is_dir() {
@@ -792,10 +975,17 @@ pub fn sweep(paths: &Paths, cgroup: &std::path::Path) {
         }
     }
     // Host-side veths are kv<9 characters of the id><4 hex digits>.
-    let Ok(links) = fs::read_dir("/sys/class/net") else { return };
+    let Ok(links) = fs::read_dir("/sys/class/net") else {
+        return;
+    };
     for link in links.flatten() {
-        let Ok(name) = link.file_name().into_string() else { continue };
-        let ours = name.strip_prefix("kv").and_then(|rest| rest.get(..9)).is_some_and(|p| ids.iter().any(|id| id.starts_with(p)));
+        let Ok(name) = link.file_name().into_string() else {
+            continue;
+        };
+        let ours = name
+            .strip_prefix("kv")
+            .and_then(|rest| rest.get(..9))
+            .is_some_and(|p| ids.iter().any(|id| id.starts_with(p)));
         if ours {
             let _ = net::detach(&name);
         }
@@ -813,11 +1003,18 @@ fn kill_cgroup(dir: &std::path::Path) {
         let _ = super::cgroup::freeze(dir, true);
         fn each(dir: &std::path::Path) {
             if let Ok(entries) = fs::read_dir(dir) {
-                for e in entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
+                for e in entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                {
                     each(&e.path());
                 }
             }
-            for pid in fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default().lines().filter_map(|l| l.parse::<libc::pid_t>().ok()) {
+            for pid in fs::read_to_string(dir.join("cgroup.procs"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.parse::<libc::pid_t>().ok())
+            {
                 // SAFETY: SIGKILL to a process of a container cgroup we own.
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
@@ -825,7 +1022,9 @@ fn kill_cgroup(dir: &std::path::Path) {
         each(dir);
     }
     for _ in 0..300 {
-        if fs::read_to_string(dir.join("cgroup.events")).map_or(true, |e| e.lines().any(|l| l == "populated 0")) {
+        if fs::read_to_string(dir.join("cgroup.events"))
+            .map_or(true, |e| e.lines().any(|l| l == "populated 0"))
+        {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -837,7 +1036,9 @@ fn kill_cgroup(dir: &std::path::Path) {
 
 /// Deletes every container directory not in `keep` and not in `running`.
 pub fn retain(paths: &Paths, keep: StrList<'_>, running: &[&str]) {
-    let Ok(entries) = fs::read_dir(&paths.containers) else { return };
+    let Ok(entries) = fs::read_dir(&paths.containers) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -848,7 +1049,11 @@ pub fn retain(paths: &Paths, keep: StrList<'_>, running: &[&str]) {
 }
 
 pub(super) fn valid_id(id: &str) -> io::Result<()> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad id"));
     }
     Ok(())
@@ -864,14 +1069,31 @@ fn make_workdir(cwd: &std::ffi::CStr) {
     use std::os::unix::fs::DirBuilderExt;
     // SAFETY: the bytes came from a &str, so they are valid UTF-8.
     let dir = unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(cwd.to_bytes()) };
-    let _ = fs::DirBuilder::new().recursive(true).mode(0o755).create(dir);
+    let _ = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir);
 }
 
-fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname: Option<&str>, flags: u32, caps: u64) -> io::Result<Prepared> {
-    let c = |s: &str| CString::new(s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"));
+fn prepare(
+    argv: StrList<'_>,
+    env: StrList<'_>,
+    cwd: &str,
+    user: &str,
+    hostname: Option<&str>,
+    flags: u32,
+    caps: u64,
+) -> io::Result<Prepared> {
+    let c = |s: &str| {
+        CString::new(s)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))
+    };
     let argv = argv.iter().map(c).collect::<io::Result<Vec<_>>>()?;
     let mut envp = env.iter().map(c).collect::<io::Result<Vec<_>>>()?;
-    let path = env.iter().find_map(|e| e.strip_prefix("PATH=")).unwrap_or(DEFAULT_PATH);
+    let path = env
+        .iter()
+        .find_map(|e| e.strip_prefix("PATH="))
+        .unwrap_or(DEFAULT_PATH);
     if !env.iter().any(|e| e.starts_with("PATH=")) {
         envp.push(c(&format!("PATH={DEFAULT_PATH}"))?);
     }
@@ -887,7 +1109,11 @@ fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname:
     Ok(Prepared {
         argv,
         envp,
-        path_dirs: path.split(':').filter(|d| !d.is_empty()).map(|d| d.as_bytes().to_vec()).collect(),
+        path_dirs: path
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(|d| d.as_bytes().to_vec())
+            .collect(),
         hostname: hostname.map(|h| h.as_bytes().to_vec()),
         domainname: None,
         net_join: None,
@@ -915,7 +1141,12 @@ fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname:
 
 /// Writes the container's /etc/hosts, /etc/resolv.conf and /etc/hostname
 /// beside its writable layer; the child binds them over the image's files.
-fn write_etc_files(spec: &RunSpec<'_>, base: &std::path::Path, upstream: &[[u8; 4]], embedded: Option<[u8; 4]>) -> io::Result<Vec<(CString, CString)>> {
+fn write_etc_files(
+    spec: &RunSpec<'_>,
+    base: &std::path::Path,
+    upstream: &[[u8; 4]],
+    embedded: Option<[u8; 4]>,
+) -> io::Result<Vec<(CString, CString)>> {
     fs::create_dir_all(base)?;
     // `--network container:<id>` shares that container's files, as Docker does.
     if let Some(target) = net_opts::values(spec.net.opts, net_opts::NETNS).next() {
@@ -924,26 +1155,48 @@ fn write_etc_files(spec: &RunSpec<'_>, base: &std::path::Path, upstream: &[[u8; 
         let mut out = Vec::new();
         for name in ["hosts", "resolv.conf", "hostname"] {
             let src = theirs.join(name);
-            fs::metadata(&src).map_err(|e| io::Error::new(e.kind(), format!("network container {target}: {name}: {e}")))?;
-            out.push((sys::cstr(&src)?, CString::new(format!("etc/{name}")).expect("no NUL")));
+            fs::metadata(&src).map_err(|e| {
+                io::Error::new(e.kind(), format!("network container {target}: {name}: {e}"))
+            })?;
+            out.push((
+                sys::cstr(&src)?,
+                CString::new(format!("etc/{name}")).expect("no NUL"),
+            ));
         }
         return Ok(out);
     }
-    let domain = net_opts::values(spec.net.opts, net_opts::DOMAINNAME).next().filter(|d| !d.is_empty());
-    let mut hosts = String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
+    let domain = net_opts::values(spec.net.opts, net_opts::DOMAINNAME)
+        .next()
+        .filter(|d| !d.is_empty());
+    let mut hosts =
+        String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     // On an IPv6-only network the IPv4 address is Kiri's own name for it.
     let v4 = spec.net.ip != [0; 4] && !net::Plug::from_opts(spec.net.opts).no_ipv4;
     if v4 {
         match domain {
-            Some(d) => hosts.push_str(&format!("{}\t{}.{d} {}\n", net::ip_str(spec.net.ip), spec.hostname, spec.hostname)),
-            None => hosts.push_str(&format!("{}\t{}\n", net::ip_str(spec.net.ip), spec.hostname)),
+            Some(d) => hosts.push_str(&format!(
+                "{}\t{}.{d} {}\n",
+                net::ip_str(spec.net.ip),
+                spec.hostname,
+                spec.hostname
+            )),
+            None => hosts.push_str(&format!(
+                "{}\t{}\n",
+                net::ip_str(spec.net.ip),
+                spec.hostname
+            )),
         }
     }
     if spec.net.ip != [0; 4] {
         // On an IPv6 network the IPv6 address names it too, as Docker writes it.
         if let Some(v) = net::Ip6::from_opts(spec.net.opts) {
             match domain {
-                Some(d) => hosts.push_str(&format!("{}\t{}.{d} {}\n", net::ip6_str(v.ip), spec.hostname, spec.hostname)),
+                Some(d) => hosts.push_str(&format!(
+                    "{}\t{}.{d} {}\n",
+                    net::ip6_str(v.ip),
+                    spec.hostname,
+                    spec.hostname
+                )),
                 None => hosts.push_str(&format!("{}\t{}\n", net::ip6_str(v.ip), spec.hostname)),
             }
         }
@@ -963,12 +1216,19 @@ fn write_etc_files(spec: &RunSpec<'_>, base: &std::path::Path, upstream: &[[u8; 
         hosts.push('\n');
     }
     let resolv = resolv_conf(spec, upstream, embedded);
-    let files = [("hosts", hosts), ("resolv.conf", resolv), ("hostname", format!("{}\n", spec.hostname))];
+    let files = [
+        ("hosts", hosts),
+        ("resolv.conf", resolv),
+        ("hostname", format!("{}\n", spec.hostname)),
+    ];
     let mut out = Vec::with_capacity(files.len());
     for (name, text) in files {
         let src = base.join(name);
         fs::write(&src, text)?;
-        out.push((sys::cstr(&src)?, CString::new(format!("etc/{name}")).expect("no NUL")));
+        out.push((
+            sys::cstr(&src)?,
+            CString::new(format!("etc/{name}")).expect("no NUL"),
+        ));
     }
     Ok(out)
 }
@@ -989,8 +1249,14 @@ fn embedded_dns(spec: &RunSpec<'_>, upstream: &[[u8; 4]], relay: bool) -> bool {
     }
     let bridged = !spec.net.bridge.is_empty()
         && spec.flags & (run_flags::NET_HOST | run_flags::NET_NONE) == 0
-        && net_opts::values(spec.net.opts, net_opts::NETNS).next().is_none();
-    bridged && net_opts::values(spec.net.opts, net_opts::NAMESERVER).next().is_none() && (relay || net::local_resolver(upstream))
+        && net_opts::values(spec.net.opts, net_opts::NETNS)
+            .next()
+            .is_none();
+    bridged
+        && net_opts::values(spec.net.opts, net_opts::NAMESERVER)
+            .next()
+            .is_none()
+        && (relay || net::local_resolver(upstream))
 }
 
 /// The address a container that uses the agent's resolver names in its
@@ -1002,7 +1268,11 @@ fn embedded_dns(spec: &RunSpec<'_>, upstream: &[[u8; 4]], relay: bool) -> bool {
 /// step that isn't `--network=host`): those steps would ask 8.8.8.8, not
 /// the Mac's resolver, and VPN and company names would stop resolving.
 fn embedded_address(spec: &RunSpec<'_>, relay: bool) -> [u8; 4] {
-    if relay && spec.flags & run_flags::DNS_GATEWAY == 0 && spec.net.gateway != [0; 4] { spec.net.gateway } else { super::dns::EMBEDDED }
+    if relay && spec.flags & run_flags::DNS_GATEWAY == 0 && spec.net.gateway != [0; 4] {
+        spec.net.gateway
+    } else {
+        super::dns::EMBEDDED
+    }
 }
 
 fn resolv_conf(spec: &RunSpec<'_>, upstream: &[[u8; 4]], embedded: Option<[u8; 4]>) -> String {
@@ -1023,7 +1293,9 @@ fn resolv_conf(spec: &RunSpec<'_>, upstream: &[[u8; 4]], embedded: Option<[u8; 4
         }
     }
     // `--dns-search .` means no search domains.
-    let search: Vec<&str> = net_opts::values(spec.net.opts, net_opts::SEARCH).filter(|s| *s != ".").collect();
+    let search: Vec<&str> = net_opts::values(spec.net.opts, net_opts::SEARCH)
+        .filter(|s| *s != ".")
+        .collect();
     if !search.is_empty() {
         resolv.push_str(&format!("search {}\n", search.join(" ")));
     }
@@ -1061,21 +1333,44 @@ fn parse_mounts(list: StrList<'_>) -> io::Result<Vec<Mount>> {
     for m in list.iter() {
         let mut parts = m.split('\t');
         let (Some(src), Some(target)) = (parts.next(), parts.next()) else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad mount {m}")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bad mount {m}"),
+            ));
         };
-        let flags: Vec<&str> = parts.next().unwrap_or("").split(',').filter(|f| !f.is_empty()).collect();
+        let flags: Vec<&str> = parts
+            .next()
+            .unwrap_or("")
+            .split(',')
+            .filter(|f| !f.is_empty())
+            .collect();
         if !target.starts_with('/') || target.split('/').any(|c| c == "..") {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad mount target {target}")));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("bad mount target {target}"),
+            ));
         }
         let rel = target.trim_start_matches('/');
         let target = CString::new(if rel.is_empty() { "." } else { rel })?;
         let ro = flags.contains(&"ro");
         if flags.contains(&"tmpfs") {
             let opts: Vec<&str> = flags.iter().copied().filter(|f| f.contains('=')).collect();
-            let opts = if opts.is_empty() { "mode=1777".to_owned() } else { opts.join(",") };
+            let opts = if opts.is_empty() {
+                "mode=1777".to_owned()
+            } else {
+                opts.join(",")
+            };
             let tmpfs_flags = tmpfs_flags(&flags);
             let ro = tmpfs_flags & libc::MS_RDONLY != 0;
-            out.push(Mount { source: None, target, ro, dir: true, copy_up: false, tmpfs_opts: Some(CString::new(opts)?), tmpfs_flags });
+            out.push(Mount {
+                source: None,
+                target,
+                ro,
+                dir: true,
+                copy_up: false,
+                tmpfs_opts: Some(CString::new(opts)?),
+                tmpfs_flags,
+            });
             continue;
         }
         // A missing source becomes a directory, as Docker does; one that is
@@ -1083,10 +1378,16 @@ fn parse_mounts(list: StrList<'_>) -> io::Result<Vec<Mount>> {
         if flags.contains(&"create") && fs::symlink_metadata(src).is_err() {
             fs::create_dir_all(src)?;
         }
-        if let (Some(kind), Some(device), Some(mflags), data) = (parts.next().filter(|k| !k.is_empty()), parts.next(), parts.next(), parts.next()) {
+        if let (Some(kind), Some(device), Some(mflags), data) = (
+            parts.next().filter(|k| !k.is_empty()),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) {
             super::volmount::ensure(src, kind, device, mflags, data.unwrap_or(""))?;
         }
-        let meta = fs::metadata(src).map_err(|e| io::Error::new(e.kind(), format!("mount source {src}: {e}")))?;
+        let meta = fs::metadata(src)
+            .map_err(|e| io::Error::new(e.kind(), format!("mount source {src}: {e}")))?;
         out.push(Mount {
             source: Some(sys::cstr(src)?),
             target,
@@ -1107,7 +1408,11 @@ fn parse_mounts(list: StrList<'_>) -> io::Result<Vec<Mount>> {
 /// How deep a mount target is: `.` is 0, `app` 1, `app/node_modules` 2.
 fn depth(target: &CStr) -> usize {
     let t = target.to_bytes();
-    if t == b"." { 0 } else { t.split(|&b| b == b'/').filter(|c| !c.is_empty()).count() }
+    if t == b"." {
+        0
+    } else {
+        t.split(|&b| b == b'/').filter(|c| !c.is_empty()).count()
+    }
 }
 
 /// A tmpfs's mount flags from its flag words, in order, so `exec` after
@@ -1140,7 +1445,13 @@ fn apply_mount(root: BorrowedFd<'_>, image: Option<BorrowedFd<'_>>, m: &Mount) -
     let t = Path::new(std::ffi::OsStr::from_bytes(m.target.to_bytes()));
     if let Some(opts) = &m.tmpfs_opts {
         let at = inroot::open(root, t, Last::Dir)?;
-        return sys::mount(c"tmpfs", &at.proc_path(), c"tmpfs", m.tmpfs_flags, Some(opts));
+        return sys::mount(
+            c"tmpfs",
+            &at.proc_path(),
+            c"tmpfs",
+            m.tmpfs_flags,
+            Some(opts),
+        );
     }
     let src = m.source.as_ref().expect("bind mounts have a source");
     let at = inroot::open(root, t, if m.dir { Last::Dir } else { Last::File })?;
@@ -1175,7 +1486,9 @@ fn apply_mount(root: BorrowedFd<'_>, image: Option<BorrowedFd<'_>>, m: &Mount) -
         if let Some(from_path) = from_path {
             let src_path = Path::new(std::ffi::OsStr::from_bytes(src.to_bytes()));
             let image_path = Path::new(std::ffi::OsStr::from_bytes(from_path.to_bytes()));
-            let empty = fs::read_dir(src_path).map(|mut d| d.next().is_none()).unwrap_or(false);
+            let empty = fs::read_dir(src_path)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
             if empty && image_path.is_dir() {
                 copy_tree(image_path, src_path)?;
             }
@@ -1186,7 +1499,13 @@ fn apply_mount(root: BorrowedFd<'_>, image: Option<BorrowedFd<'_>>, m: &Mount) -
         // The descriptor is the directory under the new mount; look again
         // to reach the mount itself.
         let at = inroot::open(root, t, Last::Exists)?;
-        sys::mount(c"none", &at.proc_path(), c"none", libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC, None)?;
+        sys::mount(
+            c"none",
+            &at.proc_path(),
+            c"none",
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -1198,19 +1517,38 @@ fn mark_mountpoint(dir: &std::ffi::CStr) {
     // SAFETY: a valid NUL-terminated path and a one-byte value. A filesystem
     // without user xattrs refuses it; the same-folder check still covers the
     // first start then.
-    unsafe { libc::setxattr(dir.as_ptr(), MOUNTPOINT_MARK.as_ptr(), b"1".as_ptr().cast(), 1, 0) };
+    unsafe {
+        libc::setxattr(
+            dir.as_ptr(),
+            MOUNTPOINT_MARK.as_ptr(),
+            b"1".as_ptr().cast(),
+            1,
+            0,
+        )
+    };
 }
 
 fn is_mountpoint_mark(dir: &std::ffi::CStr) -> bool {
     let mut v = [0u8; 1];
     // SAFETY: reads at most `v.len()` bytes into `v`.
-    unsafe { libc::getxattr(dir.as_ptr(), MOUNTPOINT_MARK.as_ptr(), v.as_mut_ptr().cast(), v.len()) >= 0 }
+    unsafe {
+        libc::getxattr(
+            dir.as_ptr(),
+            MOUNTPOINT_MARK.as_ptr(),
+            v.as_mut_ptr().cast(),
+            v.len(),
+        ) >= 0
+    }
 }
 
 /// Both descriptors name the same folder (device and inode).
 fn same_dir(a: &inroot::Found, b: &inroot::Found) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let meta = |f: &inroot::Found| fs::metadata(Path::new(std::ffi::OsStr::from_bytes(f.proc_path().to_bytes())));
+    let meta = |f: &inroot::Found| {
+        fs::metadata(Path::new(std::ffi::OsStr::from_bytes(
+            f.proc_path().to_bytes(),
+        )))
+    };
     matches!((meta(a), meta(b)), (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino())
 }
 
@@ -1221,7 +1559,14 @@ fn same_dir(a: &inroot::Found, b: &inroot::Found) -> bool {
 fn image_tree() -> Option<OwnedFd> {
     const OPEN_TREE_CLONE: libc::c_uint = 1;
     // SAFETY: a valid NUL-terminated path; the result is a new descriptor or -1.
-    let fd = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, c".".as_ptr(), OPEN_TREE_CLONE | libc::O_CLOEXEC as libc::c_uint) };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_open_tree,
+            libc::AT_FDCWD,
+            c".".as_ptr(),
+            OPEN_TREE_CLONE | libc::O_CLOEXEC as libc::c_uint,
+        )
+    };
     // SAFETY: a descriptor the kernel just returned, owned only here.
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
@@ -1272,7 +1617,11 @@ fn bind_file(root: BorrowedFd<'_>, src: &CStr, target: &CStr) -> io::Result<()> 
     // lower-layer file for writing would copy it up into the writable layer,
     // three times per container, for nothing. A bind mount sits over a
     // lower-layer file just fine, and an O_PATH lookup copies nothing.
-    let at = inroot::open(root, Path::new(std::ffi::OsStr::from_bytes(target.to_bytes())), Last::File)?;
+    let at = inroot::open(
+        root,
+        Path::new(std::ffi::OsStr::from_bytes(target.to_bytes())),
+        Last::File,
+    )?;
     sys::mount(src, &at.proc_path(), c"none", libc::MS_BIND, None)
 }
 
@@ -1291,10 +1640,16 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     let err = report_fd(io);
     let fail = |what: &str, e: io::Error| -> ! { child_fail(err, what, e) };
 
+    // Not the agent's OOM protection: the container's own (Docker's 0 unless
+    // --oom-score-adj), set while the host's /proc is still the one mounted.
+    super::hostopts::set_oom_score_adj(p.host.oom_score_adj)
+        .unwrap_or_else(|e| fail("oom_score_adj", e));
     // Mount events must not leak back into the agent's namespace.
-    sys::remount(c"/", libc::MS_REC | libc::MS_PRIVATE).unwrap_or_else(|e| fail("make mounts private", e));
+    sys::remount(c"/", libc::MS_REC | libc::MS_PRIVATE)
+        .unwrap_or_else(|e| fail("make mounts private", e));
     if let Some(ns) = &p.net_join {
-        sys::setns(ns.as_raw_fd(), libc::CLONE_NEWNET).unwrap_or_else(|e| fail("join network container", e));
+        sys::setns(ns.as_raw_fd(), libc::CLONE_NEWNET)
+            .unwrap_or_else(|e| fail("join network container", e));
     }
     // SAFETY: `rootfs` is a valid NUL-terminated path.
     if unsafe { libc::chdir(rootfs.as_ptr()) } != 0 {
@@ -1302,16 +1657,22 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     }
     let root = inroot::open_root(Path::new(".")).unwrap_or_else(|e| fail("enter rootfs", e));
     let root = root.as_fd();
-    mount_container_filesystems(p.privileged, p.shm_size, p.ipc_host).unwrap_or_else(|e| fail("mount", e));
+    mount_container_filesystems(p.privileged, p.shm_size, p.ipc_host)
+        .unwrap_or_else(|e| fail("mount", e));
     super::hostopts::make_nodes(root, &p.host.nodes).unwrap_or_else(|e| fail("devices", e));
     for (src, target) in &p.etc_files {
         bind_file(root, src, target).unwrap_or_else(|e| fail(&target.to_string_lossy(), e));
     }
     // The image's tree without the mounts made on it, for filling new
     // volumes; closed (and so unmounted) once they are all in place.
-    let image = if p.mounts.iter().any(|m| m.copy_up) { image_tree() } else { None };
+    let image = if p.mounts.iter().any(|m| m.copy_up) {
+        image_tree()
+    } else {
+        None
+    };
     for m in &p.mounts {
-        apply_mount(root, image.as_ref().map(|f| f.as_fd()), m).unwrap_or_else(|e| fail(&format!("mount {}", m.target.to_string_lossy()), e));
+        apply_mount(root, image.as_ref().map(|f| f.as_fd()), m)
+            .unwrap_or_else(|e| fail(&format!("mount {}", m.target.to_string_lossy()), e));
     }
     drop(image);
 
@@ -1336,7 +1697,14 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     make_workdir(&p.cwd);
     if p.readonly_rootfs {
         // Only the root itself: volumes, tmpfs and /dev stay as they are.
-        sys::mount(c"none", c"/", c"none", libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY, None).unwrap_or_else(|e| fail("read-only root", e));
+        sys::mount(
+            c"none",
+            c"/",
+            c"none",
+            libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY,
+            None,
+        )
+        .unwrap_or_else(|e| fail("read-only root", e));
     }
     if let Some(h) = &p.hostname {
         sys::sethostname(h).unwrap_or_else(|e| fail("hostname", e));
@@ -1358,7 +1726,10 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
         let mut b = [0u8; 1];
         // SAFETY: reading one byte into a local buffer.
         if unsafe { libc::read(ready.as_raw_fd(), b.as_mut_ptr().cast(), 1) } != 1 {
-            fail("network", io::Error::other("the agent could not set up this container's network"));
+            fail(
+                "network",
+                io::Error::other("the agent could not set up this container's network"),
+            );
         }
     }
     finish_child(p, io, true)
@@ -1368,6 +1739,8 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
 /// namespaces (the PID namespace was set before clone), then execs.
 fn exec_child(p: &Prepared, namespaces: &[(fs::File, libc::c_int)], io: &ChildStdio) -> ! {
     let err = report_fd(io);
+    super::hostopts::set_oom_score_adj(p.host.oom_score_adj)
+        .unwrap_or_else(|e| child_fail(err, "oom_score_adj", e));
     for (fd, kind) in namespaces {
         sys::setns(fd.as_raw_fd(), *kind).unwrap_or_else(|e| child_fail(err, "join container", e));
     }
@@ -1379,8 +1752,12 @@ fn exec_child(p: &Prepared, namespaces: &[(fs::File, libc::c_int)], io: &ChildSt
 /// Binds the container's terminal over /dev/console; neither a privileged
 /// nor an unprivileged container's /dev has one of its own.
 fn bind_console(slave: &OwnedFd) {
-    let Ok(pts) = fs::read_link(format!("/proc/self/fd/{}", slave.as_raw_fd())) else { return };
-    let Ok(pts) = CString::new(pts.into_os_string().into_encoded_bytes()) else { return };
+    let Ok(pts) = fs::read_link(format!("/proc/self/fd/{}", slave.as_raw_fd())) else {
+        return;
+    };
+    let Ok(pts) = CString::new(pts.into_os_string().into_encoded_bytes()) else {
+        return;
+    };
     if fs::symlink_metadata("/dev/console").is_err() {
         let _ = fs::File::create("/dev/console");
     }
@@ -1399,7 +1776,8 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
             // The pty comes from the container's own /dev/pts, so `tty` and
             // job control see a terminal that exists inside the container.
             let (master, slave) = sys::open_pty().unwrap_or_else(|e| fail("terminal", e));
-            sys::send_fd(sock.as_raw_fd(), master.as_raw_fd()).unwrap_or_else(|e| fail("terminal", e));
+            sys::send_fd(sock.as_raw_fd(), master.as_raw_fd())
+                .unwrap_or_else(|e| fail("terminal", e));
             drop(master);
             // As runc does: /dev/console is this terminal, not the VM's
             // console, so what an init such as systemd writes there reaches
@@ -1420,7 +1798,11 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
                 }
             }
         }
-        ChildStdio::Pipes { stdin, stdout, stderr } => {
+        ChildStdio::Pipes {
+            stdin,
+            stdout,
+            stderr,
+        } => {
             // SAFETY: plain descriptor operations on descriptors we own.
             unsafe {
                 // A session of its own, as runc gives every container and
@@ -1433,7 +1815,11 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
                     Some(fd) => fd.as_raw_fd(),
                     None => libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY),
                 };
-                if input < 0 || libc::dup2(input, 0) < 0 || libc::dup2(stdout.as_raw_fd(), 1) < 0 || libc::dup2(stderr.as_raw_fd(), 2) < 0 {
+                if input < 0
+                    || libc::dup2(input, 0) < 0
+                    || libc::dup2(stdout.as_raw_fd(), 1) < 0
+                    || libc::dup2(stderr.as_raw_fd(), 2) < 0
+                {
                     fail("stdio", io::Error::last_os_error());
                 }
             }
@@ -1479,16 +1865,22 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
     .unwrap_or_else(|e| fail("seccomp", e));
     let (uid, gid) = resolve_user(&p.user).unwrap_or_else(|e| fail("user", e));
     // The user's /etc/group memberships and --group-add, as Docker gives them.
-    let groups = super::hostopts::supplementary_groups(&p.user, uid, &p.host.groups).unwrap_or_else(|e| fail("groups", e));
+    let groups = super::hostopts::supplementary_groups(&p.user, uid, &p.host.groups)
+        .unwrap_or_else(|e| fail("groups", e));
     give_stdio([0, 1, 2], uid).unwrap_or_else(|e| fail("stdio", e));
     // SAFETY: plain id-setting syscalls; `groups` outlives setgroups.
     unsafe {
-        if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0 || libc::setgid(gid) != 0 || libc::setuid(uid) != 0 {
+        if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
+            || libc::setgid(gid) != 0
+            || libc::setuid(uid) != 0
+        {
             fail("switch user", io::Error::last_os_error());
         }
         if libc::chdir(p.cwd.as_ptr()) != 0 {
             // Docker creates the whole working directory path, like mkdir -p.
-            let _ = fs::create_dir_all(std::ffi::OsStr::from_encoded_bytes_unchecked(p.cwd.as_bytes()));
+            let _ = fs::create_dir_all(std::ffi::OsStr::from_encoded_bytes_unchecked(
+                p.cwd.as_bytes(),
+            ));
             if libc::chdir(p.cwd.as_ptr()) != 0 {
                 fail("working directory", io::Error::last_os_error());
             }
@@ -1496,14 +1888,26 @@ fn finish_child(p: &Prepared, io: &ChildStdio, console: bool) -> ! {
     }
 
     let exe = find_executable(p).unwrap_or_else(|| {
-        fail(&p.argv[0].to_string_lossy(), io::Error::new(io::ErrorKind::NotFound, "executable file not found in $PATH"))
+        fail(
+            &p.argv[0].to_string_lossy(),
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "executable file not found in $PATH",
+            ),
+        )
     });
     let mut argv: Vec<*const libc::c_char> = p.argv.iter().map(|a| a.as_ptr()).collect();
     argv.push(std::ptr::null());
     // Docker sets HOME from the user's passwd entry when the image and the
     // run do not: /root for root, else / if the user has no entry.
     let home = (!p.envp.iter().any(|e| e.as_bytes().starts_with(b"HOME="))).then(|| {
-        let dir = home_of(uid).unwrap_or_else(|| if uid == 0 { "/root".to_owned() } else { "/".to_owned() });
+        let dir = home_of(uid).unwrap_or_else(|| {
+            if uid == 0 {
+                "/root".to_owned()
+            } else {
+                "/".to_owned()
+            }
+        });
         CString::new(format!("HOME={dir}")).unwrap_or_default()
     });
     let mut envp: Vec<*const libc::c_char> = p.envp.iter().map(|e| e.as_ptr()).collect();
@@ -1552,7 +1956,10 @@ fn mount_container_filesystems(privileged: bool, shm_size: u64, ipc_host: bool) 
         // the same).
         let path = Path::new(std::ffi::OsStr::from_bytes(d.to_bytes()));
         if !fs::symlink_metadata(path)?.is_dir() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("/{} in the image must be a directory", path.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("/{} in the image must be a directory", path.display()),
+            ));
         }
     }
     sys::mount(c"proc", c"proc", c"proc", nosuid_nodev_noexec, None)?;
@@ -1563,7 +1970,13 @@ fn mount_container_filesystems(privileged: bool, shm_size: u64, ipc_host: bool) 
     // the host's device nodes. On a Linux host that broke every terminal on
     // the machine. A privileged container gets copies of the host's devices
     // on its own tmpfs instead, as runc does.
-    sys::mount(c"tmpfs", c"dev", c"tmpfs", libc::MS_NOSUID, Some(c"mode=755,size=65536k"))?;
+    sys::mount(
+        c"tmpfs",
+        c"dev",
+        c"tmpfs",
+        libc::MS_NOSUID,
+        Some(c"mode=755,size=65536k"),
+    )?;
     if privileged {
         copy_host_devices(Path::new("/dev"), Path::new("dev"))?;
     }
@@ -1600,18 +2013,49 @@ fn mount_container_filesystems(privileged: bool, shm_size: u64, ipc_host: bool) 
     for d in [c"dev/pts", c"dev/shm", c"dev/mqueue"] {
         sys::mkdir(d, 0o755);
     }
-    sys::mount(c"devpts", c"dev/pts", c"devpts", libc::MS_NOSUID | libc::MS_NOEXEC, Some(c"newinstance,ptmxmode=0666,mode=0620,gid=5"))?;
+    sys::mount(
+        c"devpts",
+        c"dev/pts",
+        c"devpts",
+        libc::MS_NOSUID | libc::MS_NOEXEC,
+        Some(c"newinstance,ptmxmode=0666,mode=0620,gid=5"),
+    )?;
     if ipc_host {
         // The host's own /dev/shm (the root is still the host's here), so
         // shared memory segments and their files are the same on both sides.
-        sys::mount(c"/dev/shm", c"dev/shm", c"", libc::MS_BIND | libc::MS_REC, None)?;
+        sys::mount(
+            c"/dev/shm",
+            c"dev/shm",
+            c"",
+            libc::MS_BIND | libc::MS_REC,
+            None,
+        )?;
     } else {
-        let shm = CString::new(format!("mode=1777,size={}k", shm_size.div_ceil(1024))).expect("no NUL");
-        sys::mount(c"shm", c"dev/shm", c"tmpfs", nosuid_nodev_noexec, Some(&shm))?;
+        let shm =
+            CString::new(format!("mode=1777,size={}k", shm_size.div_ceil(1024))).expect("no NUL");
+        sys::mount(
+            c"shm",
+            c"dev/shm",
+            c"tmpfs",
+            nosuid_nodev_noexec,
+            Some(&shm),
+        )?;
     }
-    sys::mount(c"mqueue", c"dev/mqueue", c"mqueue", nosuid_nodev_noexec, None)?;
+    sys::mount(
+        c"mqueue",
+        c"dev/mqueue",
+        c"mqueue",
+        nosuid_nodev_noexec,
+        None,
+    )?;
     sys::mkdir(c"sys/fs/cgroup", 0o755);
-    sys::mount(c"cgroup2", c"sys/fs/cgroup", c"cgroup2", nosuid_nodev_noexec | ro, None)?;
+    sys::mount(
+        c"cgroup2",
+        c"sys/fs/cgroup",
+        c"cgroup2",
+        nosuid_nodev_noexec | ro,
+        None,
+    )?;
     if !privileged {
         harden_proc()?;
     }
@@ -1629,11 +2073,23 @@ fn copy_host_devices(from: &Path, to: &Path) -> io::Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         if from == Path::new("/dev")
-            && matches!(name.as_bytes(), b"pts" | b"shm" | b"mqueue" | b"fd" | b"console" | b".lxc" | b".lxd-mounts" | b".udev")
+            && matches!(
+                name.as_bytes(),
+                b"pts"
+                    | b"shm"
+                    | b"mqueue"
+                    | b"fd"
+                    | b"console"
+                    | b".lxc"
+                    | b".lxd-mounts"
+                    | b".udev"
+            )
         {
             continue;
         }
-        let Ok(meta) = fs::symlink_metadata(entry.path()) else { continue };
+        let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
         let ft = meta.file_type();
         let dest = to.join(&name);
         if ft.is_dir() {
@@ -1645,9 +2101,18 @@ fn copy_host_devices(from: &Path, to: &Path) -> io::Result<()> {
         if !(ft.is_char_device() || ft.is_block_device()) {
             continue;
         }
-        let Ok(c) = CString::new(dest.as_os_str().as_bytes()) else { continue };
+        let Ok(c) = CString::new(dest.as_os_str().as_bytes()) else {
+            continue;
+        };
         // SAFETY: valid NUL-terminated path.
-        if unsafe { libc::mknod(c.as_ptr(), meta.mode() as libc::mode_t, meta.rdev() as libc::dev_t) } != 0 {
+        if unsafe {
+            libc::mknod(
+                c.as_ptr(),
+                meta.mode() as libc::mode_t,
+                meta.rdev() as libc::dev_t,
+            )
+        } != 0
+        {
             continue;
         }
         // mknod applies the umask; keep the host's permissions and owner.
@@ -1667,7 +2132,12 @@ fn copy_host_devices(from: &Path, to: &Path) -> io::Result<()> {
 /// `kernel.modprobe` and run code on the host. Paths are relative to the
 /// container root (the current directory before pivot_root).
 fn harden_proc() -> io::Result<()> {
-    let ro = libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    let ro = libc::MS_BIND
+        | libc::MS_REMOUNT
+        | libc::MS_RDONLY
+        | libc::MS_NOSUID
+        | libc::MS_NODEV
+        | libc::MS_NOEXEC;
     // /proc/sys holds writable sysctls (core_pattern, modprobe, …): a path
     // to host code. This one must succeed.
     sys::mount(c"proc/sys", c"proc/sys", c"none", libc::MS_BIND, None)?;
@@ -1681,12 +2151,32 @@ fn harden_proc() -> io::Result<()> {
     }
     // Hide files that leak host memory or kernel addresses, by covering them
     // with /dev/null (already created above).
-    for p in [c"proc/kcore", c"proc/keys", c"proc/latency_stats", c"proc/timer_list", c"proc/timer_stats", c"proc/sched_debug", c"proc/interrupts"] {
+    for p in [
+        c"proc/kcore",
+        c"proc/keys",
+        c"proc/latency_stats",
+        c"proc/timer_list",
+        c"proc/timer_stats",
+        c"proc/sched_debug",
+        c"proc/interrupts",
+    ] {
         let _ = sys::mount(c"dev/null", p, c"none", libc::MS_BIND, None);
     }
     // Directories to hide, covered with an empty read-only tmpfs.
-    for p in [c"proc/scsi", c"proc/acpi", c"proc/asound", c"sys/firmware", c"sys/devices/virtual/powercap"] {
-        let _ = sys::mount(c"tmpfs", p, c"tmpfs", (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as libc::c_ulong, Some(c"size=0k"));
+    for p in [
+        c"proc/scsi",
+        c"proc/acpi",
+        c"proc/asound",
+        c"sys/firmware",
+        c"sys/devices/virtual/powercap",
+    ] {
+        let _ = sys::mount(
+            c"tmpfs",
+            p,
+            c"tmpfs",
+            (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as libc::c_ulong,
+            Some(c"size=0k"),
+        );
     }
     Ok(())
 }
@@ -1698,7 +2188,9 @@ fn home_of(uid: u32) -> Option<String> {
     let text = fs::read_to_string("/etc/passwd").ok()?;
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();
-        (f.len() >= 6 && f[2].parse() == Ok(uid)).then(|| f[5].to_owned()).filter(|h| !h.is_empty())
+        (f.len() >= 6 && f[2].parse() == Ok(uid))
+            .then(|| f[5].to_owned())
+            .filter(|h| !h.is_empty())
     })
 }
 
@@ -1747,14 +2239,19 @@ fn needs_owner(fd: RawFd, uid: libc::uid_t) -> io::Result<bool> {
 /// The `fchown` errors runc lets a start through with: EINVAL (the group
 /// isn't mapped), EPERM (the owner isn't mapped), EROFS (read-only).
 fn chown_refused(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(libc::EINVAL | libc::EPERM | libc::EROFS))
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EINVAL | libc::EPERM | libc::EROFS)
+    )
 }
 
 fn resolve_user(user: &str) -> io::Result<(libc::uid_t, libc::gid_t)> {
     if user.is_empty() {
         return Ok((0, 0));
     }
-    let (u, g) = user.split_once(':').map_or((user, None), |(u, g)| (u, Some(g)));
+    let (u, g) = user
+        .split_once(':')
+        .map_or((user, None), |(u, g)| (u, Some(g)));
     let lookup = |file: &str, name: &str| -> Option<(u32, u32)> {
         let text = fs::read_to_string(file).ok()?;
         text.lines().find_map(|l| {
@@ -1767,7 +2264,8 @@ fn resolve_user(user: &str) -> io::Result<(libc::uid_t, libc::gid_t)> {
             Some((id, gid))
         })
     };
-    let not_found = |what: &str| io::Error::new(io::ErrorKind::NotFound, format!("unknown {what} {user}"));
+    let not_found =
+        |what: &str| io::Error::new(io::ErrorKind::NotFound, format!("unknown {what} {user}"));
     let (uid, primary_gid) = match u.parse::<u32>() {
         Ok(id) => (id, lookup_gid_for_uid(id).unwrap_or(id)),
         Err(_) => lookup("/etc/passwd", u).ok_or_else(|| not_found("user"))?,
@@ -1776,7 +2274,9 @@ fn resolve_user(user: &str) -> io::Result<(libc::uid_t, libc::gid_t)> {
         None => primary_gid,
         Some(g) => match g.parse::<u32>() {
             Ok(id) => id,
-            Err(_) => lookup("/etc/group", g).map(|(id, _)| id).ok_or_else(|| not_found("group"))?,
+            Err(_) => lookup("/etc/group", g)
+                .map(|(id, _)| id)
+                .ok_or_else(|| not_found("group"))?,
         },
     };
     Ok((uid, gid))
@@ -1786,7 +2286,9 @@ fn lookup_gid_for_uid(uid: u32) -> Option<u32> {
     let text = fs::read_to_string("/etc/passwd").ok()?;
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();
-        (f.get(2)?.parse::<u32>().ok()? == uid).then(|| f.get(3)?.parse().ok()).flatten()
+        (f.get(2)?.parse::<u32>().ok()? == uid)
+            .then(|| f.get(3)?.parse().ok())
+            .flatten()
     })
 }
 
@@ -1822,11 +2324,23 @@ mod tests {
         assert!(super::plain_upper(&base).unwrap(), "fresh");
         assert!(base.join(super::PLAIN_UPPER).exists());
         std::fs::write(base.join("upper/written"), b"x").unwrap();
-        assert!(super::plain_upper(&base).unwrap(), "marked, then written to");
+        assert!(
+            super::plain_upper(&base).unwrap(),
+            "marked, then written to"
+        );
         std::fs::remove_file(base.join(super::PLAIN_UPPER)).unwrap();
-        assert!(!super::plain_upper(&base).unwrap(), "written before the mark existed");
-        assert!(!base.join(super::PLAIN_UPPER).exists(), "an old layer is never marked");
-        assert_eq!(super::overlay_features(true), "index=off,redirect_dir=nofollow,metacopy=off");
+        assert!(
+            !super::plain_upper(&base).unwrap(),
+            "written before the mark existed"
+        );
+        assert!(
+            !base.join(super::PLAIN_UPPER).exists(),
+            "an old layer is never marked"
+        );
+        assert_eq!(
+            super::overlay_features(true),
+            "index=off,redirect_dir=nofollow,metacopy=off"
+        );
         assert_eq!(super::overlay_features(false), "index=off");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1841,18 +2355,43 @@ mod tests {
         let other = me.wrapping_add(1);
         let (r, w) = super::sys::pipe().unwrap();
         assert!(super::needs_owner(w.as_raw_fd(), other).unwrap(), "a pipe");
-        assert!(super::needs_owner(r.as_raw_fd(), other).unwrap(), "its read end");
-        assert!(!super::needs_owner(w.as_raw_fd(), me).unwrap(), "a pipe the user owns already");
+        assert!(
+            super::needs_owner(r.as_raw_fd(), other).unwrap(),
+            "its read end"
+        );
+        assert!(
+            !super::needs_owner(w.as_raw_fd(), me).unwrap(),
+            "a pipe the user owns already"
+        );
         let null = std::fs::File::open("/dev/null").unwrap();
-        assert!(!super::needs_owner(null.as_raw_fd(), other).unwrap(), "/dev/null");
+        assert!(
+            !super::needs_owner(null.as_raw_fd(), other).unwrap(),
+            "/dev/null"
+        );
         let file = std::fs::File::open("/proc/self/status").unwrap();
-        assert!(!super::needs_owner(file.as_raw_fd(), other).unwrap(), "a file");
+        assert!(
+            !super::needs_owner(file.as_raw_fd(), other).unwrap(),
+            "a file"
+        );
         let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        assert!(!super::needs_owner(a.as_raw_fd(), other).unwrap(), "a socket");
-        if let Ok(ptmx) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/ptmx") {
-            assert!(super::needs_owner(ptmx.as_raw_fd(), other).unwrap(), "a terminal");
+        assert!(
+            !super::needs_owner(a.as_raw_fd(), other).unwrap(),
+            "a socket"
+        );
+        if let Ok(ptmx) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/ptmx")
+        {
+            assert!(
+                super::needs_owner(ptmx.as_raw_fd(), other).unwrap(),
+                "a terminal"
+            );
         }
-        assert!(super::needs_owner(9999, other).is_err(), "a closed descriptor");
+        assert!(
+            super::needs_owner(9999, other).is_err(),
+            "a closed descriptor"
+        );
     }
 
     /// `give_stdio` through real `fchown` calls: run as root, a pipe changes
@@ -1863,7 +2402,11 @@ mod tests {
     fn give_stdio_gives_pipes_and_fails_only_on_unexpected_errors() {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
-        let owner = |fd: i32| std::fs::metadata(format!("/proc/self/fd/{fd}")).unwrap().uid();
+        let owner = |fd: i32| {
+            std::fs::metadata(format!("/proc/self/fd/{fd}"))
+                .unwrap()
+                .uid()
+        };
         // SAFETY: a plain getter.
         let me = unsafe { libc::geteuid() };
         let other = me.wrapping_add(1);
@@ -1872,14 +2415,34 @@ mod tests {
         let null_owner = owner(null.as_raw_fd());
         super::give_stdio([r.as_raw_fd(), w.as_raw_fd(), null.as_raw_fd()], other).unwrap();
         let pipe_owner = if me == 0 { other } else { me };
-        assert_eq!((owner(r.as_raw_fd()), owner(w.as_raw_fd()), owner(null.as_raw_fd())), (pipe_owner, pipe_owner, null_owner));
-        assert!(super::give_stdio([9999, r.as_raw_fd(), w.as_raw_fd()], other).is_err(), "a closed descriptor");
+        assert_eq!(
+            (
+                owner(r.as_raw_fd()),
+                owner(w.as_raw_fd()),
+                owner(null.as_raw_fd())
+            ),
+            (pipe_owner, pipe_owner, null_owner)
+        );
+        assert!(
+            super::give_stdio([9999, r.as_raw_fd(), w.as_raw_fd()], other).is_err(),
+            "a closed descriptor"
+        );
     }
 
     #[test]
     fn only_namespace_and_mount_chown_errors_let_a_start_through() {
-        for (errno, refused) in [(libc::EPERM, true), (libc::EINVAL, true), (libc::EROFS, true), (libc::EBADF, false), (libc::EIO, false)] {
-            assert_eq!(super::chown_refused(&std::io::Error::from_raw_os_error(errno)), refused, "errno {errno}");
+        for (errno, refused) in [
+            (libc::EPERM, true),
+            (libc::EINVAL, true),
+            (libc::EROFS, true),
+            (libc::EBADF, false),
+            (libc::EIO, false),
+        ] {
+            assert_eq!(
+                super::chown_refused(&std::io::Error::from_raw_os_error(errno)),
+                refused,
+                "errno {errno}"
+            );
         }
     }
 
@@ -1906,12 +2469,22 @@ mod tests {
         super::copy_tree(&through, &vol).unwrap();
 
         let mode = |p: &std::path::Path| std::fs::symlink_metadata(p).unwrap().mode() & 0o7777;
-        assert_eq!(mode(&vol), 0o751, "the volume takes the image directory's mode");
-        assert_eq!(std::fs::metadata(&vol).unwrap().uid(), std::fs::metadata(&img).unwrap().uid());
+        assert_eq!(
+            mode(&vol),
+            0o751,
+            "the volume takes the image directory's mode"
+        );
+        assert_eq!(
+            std::fs::metadata(&vol).unwrap().uid(),
+            std::fs::metadata(&img).unwrap().uid()
+        );
         assert_eq!(std::fs::read(vol.join("conf")).unwrap(), b"hello");
         assert_eq!(mode(&vol.join("conf")), 0o640);
         assert_eq!(mode(&vol.join("sub")), 0o700);
-        assert_eq!(std::fs::read_link(vol.join("link")).unwrap(), std::path::Path::new("conf"));
+        assert_eq!(
+            std::fs::read_link(vol.join("link")).unwrap(),
+            std::path::Path::new("conf")
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -1919,77 +2492,246 @@ mod tests {
     /// said, not the later step that noticed.
     #[test]
     fn a_start_failure_is_the_childs_own_reason() {
-        assert_eq!(super::start_failure("kiri: cannot start container: mount etc/hosts: mount /proc/self/fd/24: Not a directory (os error 20)\n"), Some("mount etc/hosts: mount /proc/self/fd/24: Not a directory (os error 20)"));
-        assert_eq!(super::start_failure("noise\nkiri: cannot start container: mount: boom\nmore"), Some("mount: boom"));
+        assert_eq!(
+            super::start_failure(
+                "kiri: cannot start container: mount etc/hosts: mount /proc/self/fd/24: Not a directory (os error 20)\n"
+            ),
+            Some("mount etc/hosts: mount /proc/self/fd/24: Not a directory (os error 20)")
+        );
+        assert_eq!(
+            super::start_failure("noise\nkiri: cannot start container: mount: boom\nmore"),
+            Some("mount: boom")
+        );
         assert_eq!(super::start_failure("hello from the program\n"), None);
-        assert_eq!(super::start_failure("kiri: cannot start container: \n"), None);
+        assert_eq!(
+            super::start_failure("kiri: cannot start container: \n"),
+            None
+        );
         assert_eq!(super::start_failure(""), None);
     }
 
     #[test]
     fn mounts_go_parents_first_whatever_order_they_came_in() {
-        let m = |t: &str| super::Mount { source: None, target: std::ffi::CString::new(t).unwrap(), ro: false, dir: true, copy_up: false, tmpfs_opts: None, tmpfs_flags: 0 };
-        let mut mounts = vec![m("app/node_modules"), m("app"), m("data"), m("app/cache/x"), m(".")];
+        let m = |t: &str| super::Mount {
+            source: None,
+            target: std::ffi::CString::new(t).unwrap(),
+            ro: false,
+            dir: true,
+            copy_up: false,
+            tmpfs_opts: None,
+            tmpfs_flags: 0,
+        };
+        let mut mounts = vec![
+            m("app/node_modules"),
+            m("app"),
+            m("data"),
+            m("app/cache/x"),
+            m("."),
+        ];
         mounts.sort_by_key(|x| super::depth(&x.target));
         let order: Vec<_> = mounts.iter().map(|x| x.target.to_str().unwrap()).collect();
-        assert_eq!(order, [".", "app", "data", "app/node_modules", "app/cache/x"]);
+        assert_eq!(
+            order,
+            [".", "app", "data", "app/node_modules", "app/cache/x"]
+        );
     }
 
     fn resolv(flags: u32, opts: &[&str], upstream: &[[u8; 4]]) -> String {
         let mut buf = Vec::new();
-        let net = Net { bridge: "kiri1", ip: [10, 5, 0, 2], prefix: 24, gateway: [10, 5, 0, 1], extra_hosts: &[], dns_names: &[], opts };
-        encode_run(&mut buf, "c1", &[], &["sh"], &[], "/", "", "c1", flags, net, &[], &Limits::default(), 0, &[] as &[&str], &[]);
-        let Ok(Msg::Run(spec)) = decode(&buf) else { panic!() };
-        super::resolv_conf(&spec, upstream, (flags & run_flags::DNS_GATEWAY != 0).then_some(super::super::dns::EMBEDDED))
+        let net = Net {
+            bridge: "kiri1",
+            ip: [10, 5, 0, 2],
+            prefix: 24,
+            gateway: [10, 5, 0, 1],
+            extra_hosts: &[],
+            dns_names: &[],
+            opts,
+        };
+        encode_run(
+            &mut buf,
+            "c1",
+            &[],
+            &["sh"],
+            &[],
+            "/",
+            "",
+            "c1",
+            flags,
+            net,
+            &[],
+            &Limits::default(),
+            0,
+            &[] as &[&str],
+            &[],
+        );
+        let Ok(Msg::Run(spec)) = decode(&buf) else {
+            panic!()
+        };
+        super::resolv_conf(
+            &spec,
+            upstream,
+            (flags & run_flags::DNS_GATEWAY != 0).then_some(super::super::dns::EMBEDDED),
+        )
     }
 
     #[test]
     fn resolv_conf_follows_the_dns_settings() {
-        let opts = ["nameserver=8.8.8.8", "search=corp.example", "search=.", "option=ndots:2", "option=timeout:1"];
+        let opts = [
+            "nameserver=8.8.8.8",
+            "search=corp.example",
+            "search=.",
+            "option=ndots:2",
+            "option=timeout:1",
+        ];
         // A user network keeps the gateway's DNS, which forwards to 8.8.8.8.
-        assert_eq!(resolv(run_flags::DNS_GATEWAY, &opts, &[[192, 168, 64, 1]]), "nameserver 127.0.0.11\nsearch corp.example\noptions ndots:2 timeout:1\n");
+        assert_eq!(
+            resolv(run_flags::DNS_GATEWAY, &opts, &[[192, 168, 64, 1]]),
+            "nameserver 127.0.0.11\nsearch corp.example\noptions ndots:2 timeout:1\n"
+        );
         // The default bridge and host networks get the servers themselves.
-        assert_eq!(resolv(0, &opts, &[[192, 168, 64, 1]]), "nameserver 8.8.8.8\nsearch corp.example\noptions ndots:2 timeout:1\n");
-        assert_eq!(resolv(0, &[], &[[192, 168, 64, 1]]), "nameserver 192.168.64.1\n");
+        assert_eq!(
+            resolv(0, &opts, &[[192, 168, 64, 1]]),
+            "nameserver 8.8.8.8\nsearch corp.example\noptions ndots:2 timeout:1\n"
+        );
+        assert_eq!(
+            resolv(0, &[], &[[192, 168, 64, 1]]),
+            "nameserver 192.168.64.1\n"
+        );
     }
 
     #[test]
     fn a_resolver_at_one_of_the_hosts_own_addresses_goes_through_the_agent() {
         let mut buf = Vec::new();
-        let net = Net { bridge: "kiri0", ip: [172, 17, 0, 2], prefix: 16, gateway: [172, 17, 0, 1], extra_hosts: &[], dns_names: &[], opts: &[] };
-        encode_run(&mut buf, "c1", &[], &["sh"], &[], "/", "", "c1", 0, net, &[], &Limits::default(), 0, &[] as &[&str], &[]);
-        let Ok(Msg::Run(spec)) = decode(&buf) else { panic!() };
+        let net = Net {
+            bridge: "kiri0",
+            ip: [172, 17, 0, 2],
+            prefix: 16,
+            gateway: [172, 17, 0, 1],
+            extra_hosts: &[],
+            dns_names: &[],
+            opts: &[],
+        };
+        encode_run(
+            &mut buf,
+            "c1",
+            &[],
+            &["sh"],
+            &[],
+            "/",
+            "",
+            "c1",
+            0,
+            net,
+            &[],
+            &Limits::default(),
+            0,
+            &[] as &[&str],
+            &[],
+        );
+        let Ok(Msg::Run(spec)) = decode(&buf) else {
+            panic!()
+        };
         // TEST-NET-3: no machine running the tests has it.
-        assert!(!super::embedded_dns(&spec, &[[203, 0, 113, 53]], false), "a resolver elsewhere is asked directly");
-        assert!(!super::embedded_dns(&spec, &[], false), "no resolver: the public fallback, not the agent");
+        assert!(
+            !super::embedded_dns(&spec, &[[203, 0, 113, 53]], false),
+            "a resolver elsewhere is asked directly"
+        );
+        assert!(
+            !super::embedded_dns(&spec, &[], false),
+            "no resolver: the public fallback, not the agent"
+        );
     }
 
     #[test]
     fn in_the_vm_the_default_bridge_goes_through_the_agent() {
         let spec_with = |flags: u32, opts: &[&str], f: &dyn Fn(&kiri_proto::RunSpec<'_>)| {
             let mut buf = Vec::new();
-            let net = Net { bridge: "kiri0", ip: [172, 17, 0, 2], prefix: 16, gateway: [172, 17, 0, 1], extra_hosts: &[], dns_names: &[], opts };
-            encode_run(&mut buf, "c1", &[], &["sh"], &[], "/", "", "c1", flags, net, &[], &Limits::default(), 0, &[] as &[&str], &[]);
-            let Ok(Msg::Run(spec)) = decode(&buf) else { panic!() };
+            let net = Net {
+                bridge: "kiri0",
+                ip: [172, 17, 0, 2],
+                prefix: 16,
+                gateway: [172, 17, 0, 1],
+                extra_hosts: &[],
+                dns_names: &[],
+                opts,
+            };
+            encode_run(
+                &mut buf,
+                "c1",
+                &[],
+                &["sh"],
+                &[],
+                "/",
+                "",
+                "c1",
+                flags,
+                net,
+                &[],
+                &Limits::default(),
+                0,
+                &[] as &[&str],
+                &[],
+            );
+            let Ok(Msg::Run(spec)) = decode(&buf) else {
+                panic!()
+            };
             f(&spec);
         };
         let gateway = [[192, 168, 64, 1]];
-        spec_with(0, &[], &|s| assert!(super::embedded_dns(s, &gateway, true), "so a refused gateway can fall back to the host"));
-        spec_with(0, &["nameserver=8.8.8.8"], &|s| assert!(!super::embedded_dns(s, &gateway, true), "--dns servers are asked directly"));
-        spec_with(run_flags::NET_HOST, &[], &|s| assert!(!super::embedded_dns(s, &gateway, true), "host networking keeps the VM's resolv.conf"));
+        spec_with(0, &[], &|s| {
+            assert!(
+                super::embedded_dns(s, &gateway, true),
+                "so a refused gateway can fall back to the host"
+            )
+        });
+        spec_with(0, &["nameserver=8.8.8.8"], &|s| {
+            assert!(
+                !super::embedded_dns(s, &gateway, true),
+                "--dns servers are asked directly"
+            )
+        });
+        spec_with(run_flags::NET_HOST, &[], &|s| {
+            assert!(
+                !super::embedded_dns(s, &gateway, true),
+                "host networking keeps the VM's resolv.conf"
+            )
+        });
         // Named by the bridge's gateway, not 127.0.0.11: builders keep it
         // for their steps rather than swapping in 8.8.8.8.
-        spec_with(0, &[], &|s| assert_eq!(super::embedded_address(s, true), [172, 17, 0, 1]));
-        spec_with(0, &[], &|s| assert_eq!(super::resolv_conf(s, &gateway, Some(super::embedded_address(s, true))), "nameserver 172.17.0.1\n"));
+        spec_with(0, &[], &|s| {
+            assert_eq!(super::embedded_address(s, true), [172, 17, 0, 1])
+        });
+        spec_with(0, &[], &|s| {
+            assert_eq!(
+                super::resolv_conf(s, &gateway, Some(super::embedded_address(s, true))),
+                "nameserver 172.17.0.1\n"
+            )
+        });
         // A user network keeps Docker's 127.0.0.11, as does a Linux host.
-        spec_with(run_flags::DNS_GATEWAY, &[], &|s| assert_eq!(super::embedded_address(s, true), super::super::dns::EMBEDDED));
-        spec_with(0, &[], &|s| assert_eq!(super::embedded_address(s, false), super::super::dns::EMBEDDED));
+        spec_with(run_flags::DNS_GATEWAY, &[], &|s| {
+            assert_eq!(
+                super::embedded_address(s, true),
+                super::super::dns::EMBEDDED
+            )
+        });
+        spec_with(0, &[], &|s| {
+            assert_eq!(
+                super::embedded_address(s, false),
+                super::super::dns::EMBEDDED
+            )
+        });
     }
 
     #[test]
     fn macs_parse() {
-        assert_eq!(super::net::parse_mac("02:42:ac:11:00:02"), Some([2, 0x42, 0xac, 0x11, 0, 2]));
-        assert_eq!(super::net::mac_for([172, 17, 0, 2]), [2, 0x42, 0xac, 0x11, 0, 2]);
+        assert_eq!(
+            super::net::parse_mac("02:42:ac:11:00:02"),
+            Some([2, 0x42, 0xac, 0x11, 0, 2])
+        );
+        assert_eq!(
+            super::net::mac_for([172, 17, 0, 2]),
+            [2, 0x42, 0xac, 0x11, 0, 2]
+        );
         assert_eq!(super::net::parse_mac("02:42:ac:11:00"), None);
         assert_eq!(super::net::parse_mac("02:42:ac:11:00:02:03"), None);
     }
