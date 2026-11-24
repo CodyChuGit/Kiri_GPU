@@ -92,8 +92,9 @@ not to `kiri-stack@`. Light (non-GPU) services stay on `kiri-stack@`.
 
 ## GPU stacks and the scheduler
 
-`kiri-sched` (crates/kiri-sched, installed by `install.sh`) keeps exactly one
-runtime on the two 3090s, switches between them on demand (from the front door
+`kiri-sched` (crates/kiri-sched, installed by `install.sh`) keeps one runtime
+per card on the two 3090s (a two-card runtime holds both; two one-card
+runtimes run side by side), switches between them on demand (from the front door
 on `127.0.0.1:7070` or `kiri-sched use <runtime>`), restarts a crashed runtime,
 and brings the home runtime back after a reboot. With
 `/etc/kiri/gpu-lease-required` present the Kiri daemon refuses any GPU
@@ -103,7 +104,12 @@ container the scheduler did not start. So a GPU stack:
   `kiri-run@<stack>` (never `systemctl enable kiri-stack@<stack>`);
 - has `restart: "no"` (the scheduler restarts it, with backoff) and the label
   `dev.kiri.sched.runtime: <runtime>`;
-- uses `ipc: host` when it spreads one model over both cards (NCCL shm).
+- uses `ipc: host` when it spreads one model over both cards (NCCL shm);
+- if it needs one card: has `cards = 1` in its `[[runtime]]` and names its
+  card with `device_ids: ["${KIRI_SCHED_GPUS:?set by kiri-sched}"]` instead of
+  `count: all` (the scheduler writes `/run/kiri-sched/cards/<stack>.env`
+  before each start; the lease refuses any other card). See
+  `kiri/stacks/card-test-a`.
 
 Containers start at OOM score 0 (or the stack's `oom_score_adj`), not with the
 daemon's `OOMScoreAdjust=`, so a runaway engine is killed before Kiri, sshd or
@@ -112,7 +118,7 @@ Tailscale.
 ```sh
 kiri-sched status                     # who holds the GPUs, queue, faults
 kiri-sched use maya-deepseek [min]    # switch now (and keep it that long)
-kiri-sched hold <runtime> [min]       # nothing switches until release
+kiri-sched hold <runtime> [min]       # nothing evicts it until release
 kiri-sched release; kiri-sched reset  # back to normal / clear a fault
 ```
 

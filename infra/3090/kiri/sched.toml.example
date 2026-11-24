@@ -4,6 +4,11 @@
 [sched]
 # Boot default: DeepSeek until a tool-calling benchmark picks another.
 home = "maya-deepseek"
+# Two 3090s, cards 0 and 1 in nvidia-smi order. A runtime without `cards`
+# needs both; one with `cards = 1` shares the box with another one-card
+# runtime (ComfyUI, mocap, splat, jasna, voice-isolator). Its compose file
+# names its card with device_ids: ["${KIRI_SCHED_GPUS:?}"].
+gpus = 2
 
 [[client]]
 name = "cody"
@@ -57,3 +62,22 @@ ready = "http://127.0.0.1:8189/vulkan.txt"
 concurrency = 1
 start_timeout_secs = 300
 home_after_idle_secs = 120
+
+# One-card tests: each gets one card, side by side (stacks/card-test-a|b).
+[[runtime]]
+name = "card-test-a"
+upstream = "http://127.0.0.1:8193"
+ready = "http://127.0.0.1:8193/gpus.txt"
+cards = 1
+concurrency = 1
+start_timeout_secs = 120
+home_after_idle_secs = 300
+
+[[runtime]]
+name = "card-test-b"
+upstream = "http://127.0.0.1:8194"
+ready = "http://127.0.0.1:8194/gpus.txt"
+cards = 1
+concurrency = 1
+start_timeout_secs = 120
+home_after_idle_secs = 300

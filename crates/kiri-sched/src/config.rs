@@ -65,6 +65,15 @@ pub struct Sched {
     pub state_file: PathBuf,
     /// The runtime the GPUs go back to when nothing else wants them.
     pub home: String,
+    /// GPUs on the box, numbered from 0 in `nvidia-smi` order (the CDI
+    /// device names `nvidia.com/gpu=0`, `=1`, …).
+    #[serde(default = "d_gpus")]
+    pub gpus: usize,
+    /// Where the scheduler tells a one-card stack which card it got:
+    /// `<dir>/<stack>.env` with `KIRI_SCHED_GPUS=<index>`, read by
+    /// `kiri-run@<stack>.service`.
+    #[serde(default = "d_cards_dir")]
+    pub cards_dir: PathBuf,
     /// Minimum time a runtime keeps the GPUs once ready, before interactive
     /// work for another runtime may drain it.
     #[serde(default = "d_dwell")]
@@ -152,6 +161,10 @@ pub struct Runtime {
     /// until something else is asked for.
     #[serde(default)]
     pub home_after_idle_secs: Option<u64>,
+    /// How many GPUs it needs; unset means all of them. A runtime that needs
+    /// fewer shares the box with others that fit beside it.
+    #[serde(default)]
+    pub cards: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -192,6 +205,12 @@ fn d_lease() -> PathBuf {
 }
 fn d_state() -> PathBuf {
     "/var/lib/kiri-sched/state.json".into()
+}
+fn d_gpus() -> usize {
+    2
+}
+fn d_cards_dir() -> PathBuf {
+    "/run/kiri-sched/cards".into()
 }
 fn d_dwell() -> u64 {
     180
@@ -259,6 +278,9 @@ impl Config {
             if r.unit.is_empty() {
                 r.unit = format!("kiri-run@{}.service", r.stack);
             }
+            if r.cards == 0 {
+                r.cards = c.sched.gpus;
+            }
         }
         for s in &mut c.services {
             if s.stack.is_empty() {
@@ -302,6 +324,12 @@ impl Config {
             parse_http_url(&r.ready).map_err(|e| format!("{}: ready: {e}", r.name))?;
             if r.concurrency == 0 || r.concurrency > 1024 {
                 return Err(format!("{}: concurrency must be 1-1024", r.name));
+            }
+            if r.cards == 0 || r.cards > self.sched.gpus {
+                return Err(format!(
+                    "{}: cards must be 1-{} (the box's gpus)",
+                    r.name, self.sched.gpus
+                ));
             }
             if r.start_timeout_secs == 0 {
                 return Err(format!("{}: start_timeout_secs must be over 0", r.name));
@@ -355,6 +383,9 @@ impl Config {
             }
         }
         let s = &self.sched;
+        if s.gpus == 0 || s.gpus > 16 {
+            return Err("gpus must be 1-16".into());
+        }
         if s.fence_after == 0 {
             return Err("fence_after must be over 0".into());
         }
@@ -379,6 +410,11 @@ impl Config {
 
     pub fn runtime_for_stack(&self, stack: &str) -> Option<&Runtime> {
         self.runtimes.iter().find(|r| r.stack == stack)
+    }
+
+    /// GPUs a runtime needs (all of them for a name not in the config).
+    pub fn cards(&self, rt: &str) -> usize {
+        self.runtime(rt).map_or(self.sched.gpus, |r| r.cards)
     }
 
     pub fn wait_secs(&self, class: Class) -> u64 {
@@ -452,6 +488,12 @@ name = "comfyui"
 upstream = "http://127.0.0.1:8188"
 ready = "http://127.0.0.1:8188/system_stats"
 home_after_idle_secs = 600
+cards = 1
+
+[[runtime]]
+name = "mocap"
+upstream = "http://127.0.0.1:8200"
+cards = 1
 
 [[service]]
 name = "dashboard"
@@ -471,6 +513,9 @@ mod tests {
         assert_eq!(c.runtime_for_model("glm-5.3-flash").unwrap().name, "maya");
         assert_eq!(c.sched.dwell_secs, 180);
         assert_eq!(c.services[0].restart, Restart::Always);
+        assert_eq!(c.sched.gpus, 2);
+        assert_eq!(c.cards("maya"), 2);
+        assert_eq!(c.cards("comfyui"), 1);
     }
 
     #[test]
@@ -480,6 +525,8 @@ mod tests {
             EXAMPLE.replace("name = \"comfyui\"", "name = \"maya\""),
             EXAMPLE.replace("http://127.0.0.1:8188\"\nready", "https://x:1\"\nready"),
             EXAMPLE.replace("concurrency = 4", "concurrency = 0"),
+            EXAMPLE.replace("cards = 1\n\n[[runtime]]", "cards = 3\n\n[[runtime]]"),
+            EXAMPLE.replace("listen = \"127.0.0.1:0\"", "listen = \"127.0.0.1:0\"\ngpus = 0"),
             EXAMPLE.replace("class = \"agent\"", "class = \"root\""),
             EXAMPLE.replace("2cf24dba5fb0a30e", "2cf24dba5fb0a30"),
             EXAMPLE.replace("name = \"dashboard\"", "name = \"Dash board\""),

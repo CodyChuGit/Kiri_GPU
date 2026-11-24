@@ -23,7 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{Instant, timeout};
 
 use crate::config::{Class, Config, parse_http_url};
-use crate::core::Admit;
+use crate::core::{Admit, HoldFor};
 use crate::engine::{Engine, audit};
 use crate::host::Host;
 
@@ -156,47 +156,83 @@ impl<H: Host> Front<H> {
             .find_map(|kv| kv.strip_prefix("minutes="))
             .and_then(|m| m.parse::<u64>().ok());
         let parts: Vec<&str> = path.trim_start_matches("/box/").split('/').collect();
-        let result: Result<Value, String> = {
+        let param = |k: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+        };
+        let force = param("force").is_some_and(|v| v == "1" || v == "true");
+        // Scripts on the box name themselves (`--by NAME`), so their holds
+        // can be told apart; a front-door client is its configured name.
+        let by = match param("by").filter(|n| {
+            !n.is_empty()
+                && n.len() <= 64
+                && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        }) {
+            Some(n) if caller.name == "admin-socket" => format!("admin-socket:{n}"),
+            _ => caller.name.clone(),
+        };
+        let result: Result<Value, (u16, String)> = {
             let mut core = self.engine.core();
             match parts.as_slice() {
-                // `use`: switch now and keep it for at least the dwell time.
+                // `use`: switch now and keep it for at least the dwell time
+                // (or `minutes`) counted from when it is ready.
                 ["use", rt] => {
-                    let until =
-                        now + minutes.map_or(core.config().sched.dwell_secs * 1000, |m| m * 60_000);
-                    core.set_hold(rt, Some(until), &caller.name)
-                        .map(|()| json!({"use": rt, "until": until}))
+                    let secs = minutes.map_or(core.config().sched.dwell_secs, |m| m * 60);
+                    core.set_hold(now, rt, HoldFor::AfterReady(secs), &by, force)
+                        .map(|()| {
+                            let state = core.state_of(rt, now);
+                            json!({
+                                "use": rt,
+                                "by": by,
+                                "secs_after_ready": secs,
+                                "state": state,
+                                "note": if state == "ready" { "ready now" } else { "switching: the hold's time starts once it is ready" },
+                            })
+                        })
                 }
                 ["hold", rt] => {
                     let until = minutes.filter(|&m| m > 0).map(|m| now + m * 60_000);
-                    core.set_hold(rt, until, &caller.name)
-                        .map(|()| json!({"hold": rt, "until": until}))
+                    core.set_hold(now, rt, HoldFor::Until(until), &by, force)
+                        .map(|()| json!({"hold": rt, "by": by, "until": until, "state": core.state_of(rt, now)}))
                 }
-                ["release"] => Ok(json!({"released": core.release()})),
+                ["release"] => core
+                    .release(now, None, &by, force)
+                    .map(|h| json!({"released": h})),
+                ["release", rt] => core
+                    .release(now, Some(rt), &by, force)
+                    .map(|h| json!({"released": h})),
                 ["unfence", name] => {
                     let rt = core.unfence(name);
                     drop(core);
                     Ok(json!({"unfenced": rt || self.engine.unfence_service(name)}))
                 }
                 ["reset"] => Ok(json!({"reset": core.reset()})),
-                _ => Err(format!("no admin action {path}")),
+                _ => Err((400, format!("no admin action {path}"))),
             }
         };
         match result {
             Ok(v) => {
                 audit(
                     "admin",
-                    json!({"by": caller.name, "action": path, "query": query}),
+                    json!({"by": by, "action": path, "query": query}),
                 );
                 self.engine.commit();
                 json_resp(StatusCode::OK, v)
             }
-            Err(e) => error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &e,
-                0,
-                None,
-            ),
+            Err((status, e)) => {
+                audit(
+                    "admin-refused",
+                    json!({"by": by, "action": path, "status": status, "reason": e}),
+                );
+                error(
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST),
+                    "invalid_request_error",
+                    &e,
+                    0,
+                    None,
+                )
+            }
         }
     }
 
@@ -452,7 +488,7 @@ impl<H: Host> Front<H> {
             "refused",
             json!({"client": caller.name, "runtime": rt, "status": status, "reason": reason}),
         );
-        let phase = self.engine.core().phase().name();
+        let phase = self.engine.core().phase_name();
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
         let kind = if status == StatusCode::TOO_MANY_REQUESTS {
             "rate_limit_error"

@@ -7,7 +7,7 @@
 # GPU runtimes and light services are started by the scheduler through
 # kiri-run@<stack>.service; do not enable those units yourself.
 [Unit]
-Description=Kiri GPU scheduler (one runtime on the GPUs at a time)
+Description=Kiri GPU scheduler (one runtime per GPU card at a time)
 Wants=kiri.service network-online.target
 After=kiri.service network-online.target box-cdi-refresh.service
 
@@ -19,6 +19,9 @@ User=kiri-sched
 Group=kiri-sched
 RuntimeDirectory=kiri-sched
 RuntimeDirectoryMode=0750
+# Keep cards/<stack>.env across a restart of the scheduler: a running stack's
+# unit still reads it when it is stopped.
+RuntimeDirectoryPreserve=yes
 StateDirectory=kiri-sched
 StateDirectoryMode=0700
 UMask=0077

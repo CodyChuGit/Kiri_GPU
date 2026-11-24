@@ -2,6 +2,7 @@
 //! and supervisor logic run against a fake machine in tests.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -20,12 +21,28 @@ pub trait Host: Send + Sync + 'static {
     fn vram_used(&self) -> impl Future<Output = Result<Vec<u64>, String>> + Send;
     /// Whether a readiness URL answers 2xx or 3xx.
     fn probe(&self, url: &str) -> impl Future<Output = bool> + Send;
+    /// Tells a stack which cards it gets, before its unit starts.
+    fn assign_cards(
+        &self,
+        stack: &str,
+        cards: &[usize],
+    ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 /// The real machine: systemd units (`kiri-run@<stack>.service` by
-/// default) and `nvidia-smi`.
+/// default), `nvidia-smi`, and one `<stack>.env` per stack in `cards_dir`
+/// with `KIRI_SCHED_GPUS=<card>[,<card>…]`, which `kiri-run@` reads so a
+/// one-card stack names its card (`device_ids: ["${KIRI_SCHED_GPUS}"]`).
 #[derive(Debug, Default, Clone)]
-pub struct System;
+pub struct System {
+    pub cards_dir: PathBuf,
+}
+
+/// The `<stack>.env` text for these cards.
+pub fn cards_env(cards: &[usize]) -> String {
+    let list: Vec<String> = cards.iter().map(usize::to_string).collect();
+    format!("KIRI_SCHED_GPUS={}\n", list.join(","))
+}
 
 async fn systemctl(args: &[&str]) -> Result<(), String> {
     let out = Command::new("systemctl")
@@ -87,6 +104,29 @@ impl Host for System {
             return Err(smi_failure(out.status.code(), &out.stdout, &out.stderr));
         }
         parse_vram(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    async fn assign_cards(&self, stack: &str, cards: &[usize]) -> Result<(), String> {
+        // Written whole and renamed into place; readable by root only (the
+        // unit), since anything in it becomes the stack's environment.
+        let dir = self.cards_dir.clone();
+        let stack = stack.to_owned();
+        let text = cards_env(cards);
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("{stack}.env"));
+            let tmp = dir.join(format!(".{stack}.env.tmp"));
+            {
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(text.as_bytes())?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp, &path)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("{}: {e}", self.cards_dir.display()))
     }
 
     async fn probe(&self, url: &str) -> bool {
@@ -174,6 +214,10 @@ pub mod fake {
         pub ready_urls: BTreeMap<String, bool>,
         /// Stack per readiness URL.
         pub url_stack: BTreeMap<String, String>,
+        /// The cards each stack was handed last.
+        pub cards: BTreeMap<String, Vec<usize>>,
+        /// How long a stop takes, seconds (tokio's clock).
+        pub stop_secs: u64,
     }
 
     #[derive(Debug, Default)]
@@ -211,6 +255,8 @@ pub mod fake {
         }
         async fn stop(&self, unit: &str) -> Result<(), String> {
             let stack = short(unit);
+            let wait = self.0.lock().unwrap().stop_secs;
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             let mut s = self.0.lock().unwrap();
             s.log.push(format!("stop {stack}"));
             if s.stop_fails.contains(stack) {
@@ -222,14 +268,23 @@ pub mod fake {
         async fn is_active(&self, unit: &str) -> bool {
             self.0.lock().unwrap().active.contains(short(unit))
         }
+        /// A running stack fills its cards (all of them if it was never
+        /// handed any); `leak_mib` stays on every card.
         async fn vram_used(&self) -> Result<Vec<u64>, String> {
             let s = self.0.lock().unwrap();
-            let used = if s.active.iter().any(|a| a != "dashboard") {
-                20_000
-            } else {
-                s.leak_mib
-            };
-            Ok(vec![used, used])
+            let mut used = vec![s.leak_mib; 2];
+            for a in s.active.iter().filter(|a| *a != "dashboard") {
+                match s.cards.get(a) {
+                    Some(cards) => cards.iter().for_each(|&c| used[c] = 20_000),
+                    None => used = vec![20_000; 2],
+                }
+            }
+            Ok(used)
+        }
+        async fn assign_cards(&self, stack: &str, cards: &[usize]) -> Result<(), String> {
+            let mut s = self.0.lock().unwrap();
+            s.cards.insert(stack.to_owned(), cards.to_vec());
+            Ok(())
         }
         async fn probe(&self, url: &str) -> bool {
             let s = self.0.lock().unwrap();
@@ -258,6 +313,12 @@ mod tests {
             "nvidia-smi: exit 9: Failed to initialize NVML: Insufficient Permissions"
         );
         assert_eq!(super::smi_failure(None, b"", b""), "nvidia-smi: killed");
+    }
+
+    #[test]
+    fn cards_env_lists_the_cards() {
+        assert_eq!(super::cards_env(&[1]), "KIRI_SCHED_GPUS=1\n");
+        assert_eq!(super::cards_env(&[0, 1]), "KIRI_SCHED_GPUS=0,1\n");
     }
 
     #[test]
