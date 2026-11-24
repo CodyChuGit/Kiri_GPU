@@ -35,6 +35,9 @@ pub enum SlotState {
     /// Being stopped; its cards are checked empty before anything else
     /// gets them.
     Stopping,
+    /// Its stop failed: it may still be on its cards, so they are not free
+    /// and it has no lease. Looked at again after `kiri-sched reset`.
+    Stuck,
 }
 
 impl SlotState {
@@ -44,6 +47,7 @@ impl SlotState {
             SlotState::Ready => "ready",
             SlotState::Draining => "draining",
             SlotState::Stopping => "stopping",
+            SlotState::Stuck => "stuck",
         }
     }
 }
@@ -211,7 +215,6 @@ impl Core {
         self.why
     }
 
-    #[cfg(test)]
     pub fn fault(&self) -> Option<&str> {
         self.fault.as_deref()
     }
@@ -264,7 +267,7 @@ impl Core {
     pub fn holds_lease(&self, rt: &str) -> bool {
         self.running
             .get(rt)
-            .is_some_and(|s| s.state != SlotState::Stopping)
+            .is_some_and(|s| !matches!(s.state, SlotState::Stopping | SlotState::Stuck))
     }
 
     pub fn is_ready(&self, rt: &str) -> bool {
@@ -505,7 +508,10 @@ impl Core {
     /// Whether to start a switch now, and which. The caller runs the switch
     /// and reports back with the `switch_*` calls.
     pub fn want_switch(&mut self, now: u64) -> Option<Plan> {
-        if self.trans.is_some() || self.fault.is_some() {
+        if self.trans.is_some()
+            || self.fault.is_some()
+            || self.running.values().any(|s| s.state == SlotState::Stuck)
+        {
             return None;
         }
         self.fenced.retain(|_, t| *t > now);
@@ -736,13 +742,65 @@ impl Core {
 
     /// A stop failed or cards stayed in use: no switch runs until a reset.
     /// The runtimes the switch touched are no longer counted on the GPUs.
+    /// The runtimes the switch touched stay on their cards as `Stuck`: they
+    /// may still be running, so their cards are not free.
     pub fn switch_fault(&mut self, reason: String) {
         if let Some(p) = self.trans.take() {
             for rt in p.stop.iter().chain(&p.start) {
-                self.running.remove(rt);
+                if let Some(s) = self.running.get_mut(rt) {
+                    s.state = SlotState::Stuck;
+                }
             }
         }
         self.fault = Some(reason);
+    }
+
+    /// A runtime that would not stop outside a switch (a crash check, or
+    /// startup): it keeps its cards, or all of them if they are unknown.
+    pub fn stuck(&mut self, rt: &str) {
+        match self.running.get_mut(rt) {
+            Some(s) => s.state = SlotState::Stuck,
+            None => {
+                let cards = self
+                    .boot_cards(rt)
+                    .unwrap_or_else(|| (0..self.cfg.sched.gpus).collect());
+                self.running.insert(
+                    rt.to_owned(),
+                    Slot {
+                        cards,
+                        state: SlotState::Stuck,
+                        since: 0,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Stuck runtimes, for the driver to look at once the fault is reset.
+    pub fn stuck_list(&self) -> Vec<String> {
+        self.running
+            .iter()
+            .filter(|(_, s)| s.state == SlotState::Stuck)
+            .map(|(rt, _)| rt.clone())
+            .collect()
+    }
+
+    /// A stuck runtime turned out stopped: its cards are free.
+    pub fn unstuck_stopped(&mut self, rt: &str) {
+        if self.running.get(rt).is_some_and(|s| s.state == SlotState::Stuck) {
+            self.running.remove(rt);
+        }
+    }
+
+    /// A stuck runtime turned out running and answering: it is ready again
+    /// on its cards (nothing else could have taken them).
+    pub fn unstuck_ready(&mut self, now: u64, rt: &str) {
+        if let Some(s) = self.running.get_mut(rt)
+            && s.state == SlotState::Stuck
+        {
+            s.state = SlotState::Ready;
+            s.since = now;
+        }
     }
 
     /// A ready runtime died or stopped answering; the driver has stopped it.
@@ -865,7 +923,7 @@ impl Core {
                 by: by.to_owned(),
                 after_ready_secs: Some(secs),
                 start_by: Some(
-                    now + (s.drain_secs + s.stop_timeout_secs + s.vram_wait_secs
+                    now + (s.drain_secs + r.stop_timeout_secs + s.vram_wait_secs
                         + r.start_timeout_secs
                         + 60)
                         * 1000,
@@ -944,12 +1002,12 @@ impl Core {
             return Err("this container is not a GPU runtime in the scheduler's config".into());
         };
         let slot = match self.running.get(&rt) {
-            Some(s) if s.state != SlotState::Stopping => s,
+            Some(s) if !matches!(s.state, SlotState::Stopping | SlotState::Stuck) => s,
             _ => {
                 let holders: Vec<String> = self
                     .running
                     .iter()
-                    .filter(|(_, s)| s.state != SlotState::Stopping)
+                    .filter(|(_, s)| !matches!(s.state, SlotState::Stopping | SlotState::Stuck))
                     .map(|(r, s)| format!("{r} {:?}", s.cards))
                     .collect();
                 return Err(if holders.is_empty() {

@@ -23,6 +23,8 @@ class = "agent"
 
 [[runtime]]
 name = "maya-deepseek"
+# Big engines: a stop can wait on the disk (writeback) before Kiri can kill.
+stop_timeout_secs = 240
 upstream = "http://127.0.0.1:8080"
 ready = "http://127.0.0.1:8080/health"
 models = ["deepseek-v4.1-flash"]
@@ -31,6 +33,8 @@ start_timeout_secs = 1500
 
 [[runtime]]
 name = "maya-glm"
+# Big engines: a stop can wait on the disk (writeback) before Kiri can kill.
+stop_timeout_secs = 240
 upstream = "http://127.0.0.1:8080"
 ready = "http://127.0.0.1:8080/health"
 models = ["glm-5.3-flash"]
@@ -39,6 +43,8 @@ start_timeout_secs = 1500
 
 [[runtime]]
 name = "xolotl-qwen"
+# Big engines: a stop can wait on the disk (writeback) before Kiri can kill.
+stop_timeout_secs = 240
 upstream = "http://127.0.0.1:8099"
 ready = "http://127.0.0.1:8099/v1/models"
 models = ["xol-qfn", "qwen38-flash-next-xq-abl", "qwen/qwen3.8-flash"]
