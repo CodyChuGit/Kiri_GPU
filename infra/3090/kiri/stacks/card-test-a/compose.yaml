@@ -8,6 +8,7 @@ services:
     image: vulkan-test:1
     container_name: rt-card-test-a
     network_mode: host
+    init: true
     restart: "no"
     labels:
       dev.kiri.sched.runtime: card-test-a
