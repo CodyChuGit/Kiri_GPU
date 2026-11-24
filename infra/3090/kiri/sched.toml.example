@@ -66,8 +66,8 @@ home_after_idle_secs = 120
 # One-card tests: each gets one card, side by side (stacks/card-test-a|b).
 [[runtime]]
 name = "card-test-a"
-upstream = "http://127.0.0.1:8191"
-ready = "http://127.0.0.1:8191/gpus.txt"
+upstream = "http://127.0.0.1:8193"
+ready = "http://127.0.0.1:8193/gpus.txt"
 cards = 1
 concurrency = 1
 start_timeout_secs = 120
@@ -75,8 +75,8 @@ home_after_idle_secs = 300
 
 [[runtime]]
 name = "card-test-b"
-upstream = "http://127.0.0.1:8192"
-ready = "http://127.0.0.1:8192/gpus.txt"
+upstream = "http://127.0.0.1:8194"
+ready = "http://127.0.0.1:8194/gpus.txt"
 cards = 1
 concurrency = 1
 start_timeout_secs = 120
