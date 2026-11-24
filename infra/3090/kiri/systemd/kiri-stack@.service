@@ -1,0 +1,39 @@
+# Converges one Kiri compose stack at boot: /box/config/kiri/stacks/<name>/compose.yaml
+#   systemctl enable --now kiri-stack@gpu-app
+#
+# Same pattern as CodyChuGit/NAS infra/nas/kiri: container restarts are handled
+# by each container's `restart: unless-stopped` inside Kiri; this unit only brings
+# the stack to its declared state after boot or `systemctl reload`. Stopping it
+# does not stop the containers (`docker compose down` in the stack dir does), so a
+# Kiri daemon restart never cascades into a stack teardown.
+#
+# GPU stacks own both 3090s, so only one should be enabled at a time. Add
+#   Conflicts=kiri-stack@<other>.service
+# in a drop-in per stack (install.sh does not do this for you).
+#
+# If /box/config/kiri/gpu-raw.override.yaml exists (the raw --device route,
+# written by bin/gpu-raw.sh when native CDI fails), it is layered on every stack
+# that has a gpu-raw marker file.
+[Unit]
+Description=Kiri stack %i
+Requires=kiri.service
+After=kiri.service box-cdi-refresh.service
+RequiresMountsFor=/box /models
+ConditionPathExists=/box/config/kiri/stacks/%i/compose.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/box/config/kiri/stacks/%i
+Environment=DOCKER_HOST=unix:///run/kiri/docker.sock
+Environment=COMPOSE_PROJECT_NAME=%i
+# Wait for the Kiri socket (the daemon can take a moment after systemd says "started").
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S /run/kiri/docker.sock ] && exit 0; sleep 1; done; exit 1'
+ExecStartPre=/opt/box/bin/kiri-compose config --quiet
+ExecStart=/opt/box/bin/kiri-compose up --detach --remove-orphans --wait --wait-timeout 600
+ExecReload=/opt/box/bin/kiri-compose up --detach --remove-orphans --wait --wait-timeout 600
+# Model loads onto two 3090s can take minutes; the healthcheck start_period covers it.
+TimeoutStartSec=660
+
+[Install]
+WantedBy=multi-user.target
