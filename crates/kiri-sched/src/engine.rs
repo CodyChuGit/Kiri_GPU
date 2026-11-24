@@ -346,6 +346,19 @@ impl<H: Host> Engine<H> {
         let Some(rt) = cfg.runtime(to).cloned() else {
             return self.fault(format!("runtime {to} vanished from the config"));
         };
+        // Nothing may already answer on its readiness URL (a container of
+        // an earlier instance that has not let go of the port, say): that
+        // answer would be taken for the new one being ready.
+        let deadline = Instant::now() + Duration::from_secs(cfg.sched.vram_wait_secs);
+        while self.host.probe(&rt.ready).await {
+            if Instant::now() >= deadline {
+                return self.fault(format!(
+                    "something already answers on {to}'s readiness URL {} before it was started",
+                    rt.ready
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
         if let Err(e) = self.host.assign_cards(&rt.stack, &plan.cards).await {
             return self.fault(format!("could not hand {to} its cards: {e}"));
         }
@@ -756,6 +769,24 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(e2.core().is_ready("mocap"));
         assert_eq!(e2.core().slot("mocap").unwrap().cards, [0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_port_still_answering_is_not_taken_for_ready() {
+        let e = engine(|_| {});
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        e.core().admit(e.now(), "comfyui", Class::Interactive);
+        // An old comfyui container still answers on its port.
+        e.host
+            .0
+            .lock()
+            .unwrap()
+            .ready_urls
+            .insert("http://127.0.0.1:8188/system_stats".into(), true);
+        e.step(&mut h).await;
+        assert!(e.core().fault().unwrap().contains("already answers"));
+        assert!(!e.host.log().contains(&"start comfyui".to_owned()));
     }
 
     #[tokio::test(start_paused = true)]
