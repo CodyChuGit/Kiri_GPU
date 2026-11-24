@@ -2076,6 +2076,7 @@ fn inspect(c: &Container, nets: &[super::network::Network]) -> Value {
             "Devices": super::hostopts::inspect(&c.spec.host_opts, "Devices"),
             "DeviceCgroupRules": super::hostopts::inspect(&c.spec.host_opts, "DeviceCgroupRules"),
             "GroupAdd": super::hostopts::inspect(&c.spec.host_opts, "GroupAdd"),
+            "OomScoreAdj": super::hostopts::inspect(&c.spec.host_opts, "OomScoreAdj"),
             "DeviceRequests": super::hostopts::inspect(&c.spec.host_opts, "DeviceRequests"),
         },
         "NetworkSettings": network_settings(c, nets),

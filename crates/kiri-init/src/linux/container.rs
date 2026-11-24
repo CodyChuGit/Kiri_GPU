@@ -180,6 +180,7 @@ struct HostApplied {
     groups: Vec<String>,
     nodes: Vec<super::hostopts::Node>,
     cdi: super::cdi::Cdi,
+    oom_score_adj: Option<i32>,
 }
 
 /// Docker's default capability set as a mask.
@@ -325,7 +326,7 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
         netns = netns_inode(&joined);
         prepared.net_join = Some(joined);
     }
-    prepared.host = HostApplied { rlimits: host.rlimits.clone(), groups: host.groups.clone(), nodes, cdi: host.cdi.clone() };
+    prepared.host = HostApplied { rlimits: host.rlimits.clone(), groups: host.groups.clone(), nodes, cdi: host.cdi.clone(), oom_score_adj: host.oom_score_adj };
     // Small, short-lived files: kept in memory (/run is tmpfs), not on the data disk.
     let etc_dir = PathBuf::from("/run/kiri").join(spec.id);
     let embedded_dns = embedded_dns(spec, net.upstream_dns, net.dns.relay);
@@ -613,7 +614,7 @@ pub fn exec(spec: &ExecSpec<'_>, target_pid: libc::pid_t, paths: &Paths, profile
     let mut prepared = prepare(spec.argv, spec.env, spec.cwd, spec.user, None, spec.flags, spec.caps)?;
     // The container's ulimits and groups apply to its execs too, as with runc.
     let host = super::hostopts::parse(spec.opts)?;
-    prepared.host = HostApplied { rlimits: host.rlimits, groups: host.groups, nodes: Vec::new(), cdi: Default::default() };
+    prepared.host = HostApplied { rlimits: host.rlimits, groups: host.groups, nodes: Vec::new(), cdi: Default::default(), oom_score_adj: host.oom_score_adj };
     // An exec runs under its container's profile, not the default.
     prepared.profile = profile.to_vec();
     let (parent_io, child_io) = stdio(&prepared)?;
@@ -1291,6 +1292,9 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
     let err = report_fd(io);
     let fail = |what: &str, e: io::Error| -> ! { child_fail(err, what, e) };
 
+    // Not the agent's OOM protection: the container's own (Docker's 0 unless
+    // --oom-score-adj), set while the host's /proc is still the one mounted.
+    super::hostopts::set_oom_score_adj(p.host.oom_score_adj).unwrap_or_else(|e| fail("oom_score_adj", e));
     // Mount events must not leak back into the agent's namespace.
     sys::remount(c"/", libc::MS_REC | libc::MS_PRIVATE).unwrap_or_else(|e| fail("make mounts private", e));
     if let Some(ns) = &p.net_join {
@@ -1368,6 +1372,7 @@ fn container_child(p: &Prepared, rootfs: &CStr, io: &ChildStdio) -> ! {
 /// namespaces (the PID namespace was set before clone), then execs.
 fn exec_child(p: &Prepared, namespaces: &[(fs::File, libc::c_int)], io: &ChildStdio) -> ! {
     let err = report_fd(io);
+    super::hostopts::set_oom_score_adj(p.host.oom_score_adj).unwrap_or_else(|e| child_fail(err, "oom_score_adj", e));
     for (fd, kind) in namespaces {
         sys::setns(fd.as_raw_fd(), *kind).unwrap_or_else(|e| child_fail(err, "join container", e));
     }
