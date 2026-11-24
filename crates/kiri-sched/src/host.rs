@@ -84,10 +84,7 @@ impl Host for System {
             .await
             .map_err(|e| format!("nvidia-smi: {e}"))?;
         if !out.status.success() {
-            return Err(format!(
-                "nvidia-smi: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            return Err(smi_failure(out.status.code(), &out.stdout, &out.stderr));
         }
         parse_vram(&String::from_utf8_lossy(&out.stdout))
     }
@@ -98,6 +95,22 @@ impl Host for System {
             .ok()
             .flatten()
             .is_some_and(|s| (200..400).contains(&s))
+    }
+}
+
+/// nvidia-smi prints its errors ("Failed to initialize NVML: …") on
+/// stdout, so keep both streams and the exit code.
+fn smi_failure(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+    let text: Vec<String> = [stdout, stderr]
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let code = code.map_or_else(|| "killed".to_owned(), |c| format!("exit {c}"));
+    if text.is_empty() {
+        format!("nvidia-smi: {code}")
+    } else {
+        format!("nvidia-smi: {code}: {}", text.join(" / "))
     }
 }
 
@@ -229,6 +242,20 @@ pub mod fake {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn smi_failure_keeps_what_nvidia_smi_said_on_stdout() {
+        let m = super::smi_failure(
+            Some(9),
+            b"Failed to initialize NVML: Insufficient Permissions\n",
+            b"",
+        );
+        assert_eq!(
+            m,
+            "nvidia-smi: exit 9: Failed to initialize NVML: Insufficient Permissions"
+        );
+        assert_eq!(super::smi_failure(None, b"", b""), "nvidia-smi: killed");
+    }
+
     #[test]
     fn vram_lines() {
         assert_eq!(super::parse_vram("12\n24000\n").unwrap(), [12, 24000]);

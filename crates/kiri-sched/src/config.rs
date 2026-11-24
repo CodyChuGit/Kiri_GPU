@@ -492,9 +492,14 @@ mod tests {
     #[test]
     fn shipped_example_parses() {
         let text = include_str!("../contrib/sched.example.toml");
-        let text = text.replacen("<64 hex digits>", &"a".repeat(64), 1).replacen("<64 hex digits>", &"b".repeat(64), 1);
+        let text = text
+            .replacen("<64 hex digits>", &"a".repeat(64), 1)
+            .replacen("<64 hex digits>", &"b".repeat(64), 1);
         let c = Config::parse(&text).unwrap();
-        assert_eq!(c.runtime_for_model("glm-5.3-flash").unwrap().name, "maya-glm");
+        assert_eq!(
+            c.runtime_for_model("glm-5.3-flash").unwrap().name,
+            "maya-glm"
+        );
     }
 
     #[test]

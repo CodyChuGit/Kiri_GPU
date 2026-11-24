@@ -37,8 +37,12 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 DevicePolicy=closed
+# Major 195 is "nvidia"/"nvidiactl" in /proc/devices on current drivers and
+# "nvidia-frontend" on older ones; a name that matches nothing allows nothing.
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidiactl rw
 DeviceAllow=char-nvidia-frontend rw
-DeviceAllow=char-nvidia-caps rw
+DeviceAllow=char-nvidia-caps r
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
