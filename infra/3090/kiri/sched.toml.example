@@ -1,0 +1,59 @@
+# /etc/kiri-sched/sched.toml for the 3090 box (0640 root:kiri-sched).
+# Token hashes: openssl rand -hex 24 | tee /etc/kiri-sched/tokens/<name> | kiri-sched hash-token
+# Check: kiri-sched check-config -c /etc/kiri-sched/sched.toml
+[sched]
+# Boot default: DeepSeek until a tool-calling benchmark picks another.
+home = "maya-deepseek"
+
+[[client]]
+name = "cody"
+token_sha256 = "REPLACE_ME"
+class = "interactive"
+admin = true
+
+[[client]]
+name = "agents"
+token_sha256 = "REPLACE_ME"
+class = "agent"
+
+[[runtime]]
+name = "maya-deepseek"
+upstream = "http://127.0.0.1:8080"
+ready = "http://127.0.0.1:8080/health"
+models = ["deepseek-v4.1-flash"]
+concurrency = 4
+start_timeout_secs = 1500
+
+[[runtime]]
+name = "maya-glm"
+upstream = "http://127.0.0.1:8080"
+ready = "http://127.0.0.1:8080/health"
+models = ["glm-5.3-flash"]
+concurrency = 4
+start_timeout_secs = 1500
+
+[[runtime]]
+name = "xolotl-qwen"
+upstream = "http://127.0.0.1:8099"
+ready = "http://127.0.0.1:8099/v1/models"
+models = ["xol-qfn", "qwen38-flash-next-xq-abl", "qwen/qwen3.8-flash"]
+concurrency = 4
+start_timeout_secs = 1500
+
+# Resident render server: blocks every LLM while loaded, so it goes home
+# after 10 idle minutes. avatar-serve start [min] = kiri-sched use avatar [min].
+[[runtime]]
+name = "avatar"
+upstream = "http://127.0.0.1:8190"
+ready = "http://127.0.0.1:8190/health"
+concurrency = 1
+start_timeout_secs = 600
+home_after_idle_secs = 600
+
+[[runtime]]
+name = "vulkan-test"
+upstream = "http://127.0.0.1:8189"
+ready = "http://127.0.0.1:8189/vulkan.txt"
+concurrency = 1
+start_timeout_secs = 300
+home_after_idle_secs = 120

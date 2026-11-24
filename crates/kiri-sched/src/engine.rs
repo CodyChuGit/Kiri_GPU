@@ -207,7 +207,8 @@ impl<H: Host> Engine<H> {
             Phase::Stopping { from, .. } => from,
             _ => None,
         };
-        audit("switch-begin", json!({"from": from, "to": to}));
+        let why = self.core().why();
+        audit("switch-begin", json!({"from": from, "to": to, "why": why}));
         // 1. Drain: in-flight requests get `drain_secs` to finish.
         if let Some(f) = &from {
             let deadline = Instant::now() + Duration::from_secs(cfg.sched.drain_secs);

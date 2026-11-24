@@ -17,6 +17,9 @@ infra/3090/
     kiri-stack@.service            brings /box/config/kiri/stacks/<name> up at boot
     box-cdi-refresh.service        `nvidia-ctk cdi generate` + nvidia-modprobe at every boot
   kiri/stacks/gpu-app/             template GPU service (compose.yaml + .env.example)
+  kiri/stacks/maya-deepseek/ maya-glm/ xolotl-qwen/ avatar/ vulkan-test/
+                                   the box's kiri-sched GPU runtimes (run by kiri-run@, never by hand)
+  kiri/sched.toml.example          /etc/kiri-sched/sched.toml for those runtimes (home = maya-deepseek)
   tests/gpu-validate.sh            PASS/FAIL proof that containers get working GPUs
   tools/box-probe/                 static Rust healthcheck (copy of the NAS repo's nas-probe)
 ```

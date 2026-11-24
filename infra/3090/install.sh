@@ -139,15 +139,17 @@ for s in "$here"/kiri/stacks/*/; do
   if [ -d "$dst" ]; then
     # Update the compose file, never the .env.
     install -m644 "$s/compose.yaml" "$dst/compose.yaml"
-    install -m644 "$s/.env.example" "$dst/.env.example"
+    [ -f "$s/.env.example" ] && install -m644 "$s/.env.example" "$dst/.env.example"
   else
     cp -r "$s" "$dst"
   fi
-  if [ ! -f "$dst/.env" ]; then
-    install -m600 "$dst/.env.example" "$dst/.env"
-    echo "Created $dst/.env from the example: edit it (image digest, port) before enabling $name."
+  if [ -f "$dst/.env.example" ]; then
+    if [ ! -f "$dst/.env" ]; then
+      install -m600 "$dst/.env.example" "$dst/.env"
+      echo "Created $dst/.env from the example: edit it (image digest, port) before enabling $name."
+    fi
+    chmod 600 "$dst/.env"
   fi
-  chmod 600 "$dst/.env"
   install -d -m750 -o "$ADMIN" "/box/runtimes/$name" "/box/runtimes/$name/state" "/models/$name" "/scratch/$name"
 done
 chown -R "$ADMIN" /box/exchange /models/shared /models/hf /models/torch
@@ -174,7 +176,7 @@ if [ $SCHED = 1 ]; then
   done
   install -D -m644 "$sched/50-kiri-sched.rules" /etc/polkit-1/rules.d/50-kiri-sched.rules
   install -d -m750 -g kiri-sched /etc/kiri-sched
-  install -m640 -g kiri-sched "$sched/sched.example.toml" /etc/kiri-sched/sched.example.toml
+  install -m640 -g kiri-sched "$here/kiri/sched.toml.example" /etc/kiri-sched/sched.example.toml
   systemctl daemon-reload
   if [ -f /etc/kiri-sched/sched.toml ]; then
     kiri-sched check-config -c /etc/kiri-sched/sched.toml || die "fix /etc/kiri-sched/sched.toml (kiri-sched check-config)"
@@ -182,8 +184,8 @@ if [ $SCHED = 1 ]; then
     if [ -n "$sched_changed" ]; then systemctl restart kiri-sched.service; else systemctl start kiri-sched.service; fi
     kiri-sched status || true
   else
-    echo "No /etc/kiri-sched/sched.toml yet: copy sched.example.toml there, add your runtimes and token"
-    echo "hashes (kiri-sched hash-token), then: systemctl enable --now kiri-sched"
+    echo "No /etc/kiri-sched/sched.toml yet: copy sched.example.toml there (the box's runtimes), put in"
+    echo "the token hashes (see its header), then: systemctl enable --now kiri-sched"
     echo "and, once it works, fail closed: install -d /etc/kiri && touch /etc/kiri/gpu-lease-required"
   fi
 fi

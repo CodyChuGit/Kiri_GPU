@@ -125,6 +125,8 @@ pub struct Core {
     /// Since when the ready runtime has had nothing to do (no hold, nothing
     /// in flight or waiting); see `home_after_idle_secs`.
     idle_since: Option<u64>,
+    /// Why `want_switch` last asked for a switch, for the audit log.
+    why: &'static str,
 }
 
 const BACKOFF_FIRST_MS: u64 = 5_000;
@@ -151,12 +153,18 @@ impl Core {
             switch_ms: BTreeMap::new(),
             switching: false,
             idle_since: None,
+            why: "",
             cfg,
         }
     }
 
     pub fn config(&self) -> &Arc<Config> {
         &self.cfg
+    }
+
+    /// Why the last switch `want_switch` returned was wanted.
+    pub fn why(&self) -> &'static str {
+        self.why
     }
 
     pub fn phase(&self) -> &Phase {
@@ -380,11 +388,14 @@ impl Core {
             | Phase::Starting { .. } => None,
             Phase::Idle => {
                 if let Some(h) = hold {
+                    self.why = "hold";
                     return self.startable(&h, now).then_some(h);
                 }
                 if let Some((rt, _)) = self.wanted(now, None) {
+                    self.why = "request";
                     return Some(rt);
                 }
+                self.why = "nothing on the GPUs: last good or home";
                 let home = self.cfg.sched.home.clone();
                 [self.last_good.clone(), Some(home)]
                     .into_iter()
@@ -395,10 +406,12 @@ impl Core {
                 let busy = self.inflight(cur) > 0 || self.waiting.iter().any(|w| &w.rt == cur);
                 if let Some(h) = hold {
                     self.idle_since = None;
+                    self.why = "hold";
                     return (h != *cur && self.startable(&h, now)).then_some(h);
                 }
                 if let Some((cand, urgent)) = self.wanted(now, Some(cur)) {
                     let dwelt = now.saturating_sub(*since) >= self.cfg.sched.dwell_secs * 1000;
+                    self.why = if busy { "request (current runtime dwelt)" } else { "request" };
                     return (!busy || (urgent && dwelt)).then_some(cand);
                 }
                 // Nothing else is wanted: a runtime with an idle limit goes
@@ -408,6 +421,7 @@ impl Core {
                 match limit {
                     Some(secs) if cur != home && !busy => {
                         let idle = *self.idle_since.get_or_insert(now);
+                        self.why = "idle: home_after_idle_secs";
                         (now.saturating_sub(idle) >= secs * 1000 && self.startable(home, now))
                             .then(|| home.clone())
                     }
@@ -711,6 +725,7 @@ mod tests {
         assert_eq!(c.want_switch(2602 * S), None);
         assert_eq!(c.want_switch(3201 * S), None);
         assert_eq!(c.want_switch(3202 * S), Some("maya".into()));
+        assert_eq!(c.why(), "idle: home_after_idle_secs");
         // Home itself never times out.
         assert_eq!(switch_ok(&mut c, 3203 * S), "maya");
         assert_eq!(c.want_switch(99_999 * S), None);
