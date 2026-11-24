@@ -1,0 +1,25 @@
+# kiri-sched GPU runtime "card-test-b": a one-card test. It gets whichever card the scheduler
+# hands it (KIRI_SCHED_GPUS, from /run/kiri-sched/cards/card-test-b.env via kiri-run@card-test-b)
+# and serves what it sees at http://127.0.0.1:8192/gpus.txt (its readiness URL): the
+# container should list exactly one GPU, and card-test-a and card-test-b different ones.
+name: card-test-b
+services:
+  probe:
+    image: vulkan-test:1
+    container_name: rt-card-test-b
+    network_mode: host
+    restart: "no"
+    labels:
+      dev.kiri.sched.runtime: card-test-b
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      KIRI_SCHED_GPUS: ${KIRI_SCHED_GPUS:?set by kiri-sched}
+    command: ["sh", "-c", "mkdir -p /tmp/out && { echo \"card $$KIRI_SCHED_GPUS\"; nvidia-smi -L; nvidia-smi --query-gpu=index,pci.bus_id,uuid --format=csv,noheader; } > /tmp/out/gpus.txt 2>&1; cd /tmp/out && python3 -m http.server 8192 --bind 127.0.0.1"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${KIRI_SCHED_GPUS:?set by kiri-sched}"]
+              capabilities: [gpu]
+    stop_grace_period: 5s

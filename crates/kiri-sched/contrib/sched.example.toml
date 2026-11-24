@@ -4,6 +4,7 @@
 [sched]
 listen = "127.0.0.1:7070"   # Caddy proxies here; never expose it directly
 home = "maya-deepseek"      # where the GPUs go when nothing else wants them
+gpus = 2                    # cards 0..gpus-1, in nvidia-smi order
 dwell_secs = 180            # a runtime keeps the GPUs this long before interactive work may drain it
 drain_secs = 60             # in-flight requests get this long to finish before a switch
 vram_free_mib = 500         # a GPU counts as empty at or under this
@@ -28,7 +29,9 @@ name = "rig-agents"
 token_sha256 = "<64 hex digits>"
 class = "agent"
 
-# GPU runtimes: one at a time holds both 3090s. A model swap that needs a
+# GPU runtimes. One without `cards` holds both 3090s; one with `cards = 1`
+# runs beside another one-card runtime, on the card the scheduler hands it
+# (KIRI_SCHED_GPUS; see kiri-run@.service). A model swap that needs a
 # restart is two runtimes (two stacks).
 [[runtime]]
 name = "maya-deepseek"
@@ -56,6 +59,7 @@ name = "comfyui"
 upstream = "http://127.0.0.1:8188"
 ready = "http://127.0.0.1:8188/system_stats"
 concurrency = 2
+cards = 1
 
 # A render server that blocks every LLM while loaded: no models, reached
 # through /rt/avatar/…; it goes back to home after 10 idle minutes (no

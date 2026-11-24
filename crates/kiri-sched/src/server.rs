@@ -452,7 +452,7 @@ impl<H: Host> Front<H> {
             "refused",
             json!({"client": caller.name, "runtime": rt, "status": status, "reason": reason}),
         );
-        let phase = self.engine.core().phase().name();
+        let phase = self.engine.core().phase_name();
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
         let kind = if status == StatusCode::TOO_MANY_REQUESTS {
             "rate_limit_error"

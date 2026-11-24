@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::config::{Config, Restart};
-use crate::core::{Core, Phase, Saved};
+use crate::core::{Core, Plan, Saved};
 use crate::host::Host;
 
 /// One line of JSON on stderr per event (journald keeps it): every switch,
@@ -131,29 +131,30 @@ impl<H: Host> Engine<H> {
         v
     }
 
-    /// At startup: keep the runtime that is already up if it is the one the
-    /// GPUs should go to anyway, and stop every other GPU runtime, so the
-    /// box never runs two after a crash or a reboot.
+    /// At startup: keep every GPU runtime that is already up and answering
+    /// on cards it can keep (all of them, or the ones saved for it), and
+    /// stop every other, so the box never runs two on one card after a
+    /// crash or a reboot.
     pub async fn reconcile(&self) {
         let cfg = self.config();
-        let mut active = Vec::new();
         for r in &cfg.runtimes {
-            if self.host.is_active(&r.unit).await {
-                active.push(r.clone());
+            if !self.host.is_active(&r.unit).await {
+                continue;
             }
-        }
-        let wanted = self.core().want_switch(self.now());
-        let keep = match &wanted {
-            Some(w) => match active.iter().find(|r| &r.name == w) {
-                Some(r) if self.host.probe(&r.ready).await => Some(r.name.clone()),
+            let cards = self.core().boot_cards(&r.name);
+            let kept = match cards {
+                Some(cards) if self.host.probe(&r.ready).await => {
+                    self.core().adopt(self.now(), &r.name, &cards).then_some(cards)
+                }
                 _ => None,
-            },
-            None => None,
-        };
-        for r in active.iter().filter(|r| Some(&r.name) != keep.as_ref()) {
+            };
+            if let Some(cards) = kept {
+                audit("adopt", json!({"runtime": r.name, "cards": cards}));
+                continue;
+            }
             audit(
                 "reconcile-stop",
-                json!({"runtime": r.name, "why": "running at startup but not the runtime the GPUs go to"}),
+                json!({"runtime": r.name, "why": "running at startup but not answering, or on cards it cannot keep"}),
             );
             if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
                 self.core()
@@ -162,10 +163,6 @@ impl<H: Host> Engine<H> {
                 self.commit();
                 return;
             }
-        }
-        if let Some(rt) = keep {
-            audit("adopt", json!({"runtime": rt}));
-            self.core().adopt(self.now(), &rt);
         }
         self.commit();
     }
@@ -178,43 +175,43 @@ impl<H: Host> Engine<H> {
     }
 
     /// One pass of the main loop: start a switch if one is due, else check
-    /// the runtime on the GPUs.
+    /// the runtimes on the GPUs.
     pub async fn step(&self, health: &mut Health) {
-        let to = {
+        let plan = {
             let mut core = self.core();
-            let to = core.want_switch(self.now());
-            if let Some(to) = &to {
-                core.switch_begin(to);
+            let plan = core.want_switch(self.now());
+            if let Some(p) = &plan {
+                core.switch_begin(p);
             }
-            to
+            plan
         };
-        match to {
-            Some(to) => {
-                health.failing_since = None;
+        match plan {
+            Some(p) => {
+                for rt in &p.stop {
+                    health.failing_since.remove(rt);
+                }
                 self.notify();
-                self.switch(&to).await;
+                self.switch(&p).await;
             }
             None => self.check_ready(health).await,
         }
     }
 
     /// The switch sequence; `core.switch_begin` was called.
-    async fn switch(&self, to: &str) {
+    async fn switch(&self, plan: &Plan) {
         let cfg = self.config();
         let started = Instant::now();
-        let from = match self.core().phase().clone() {
-            Phase::Draining { from, .. } => Some(from),
-            Phase::Stopping { from, .. } => from,
-            _ => None,
-        };
         let why = self.core().why();
-        audit("switch-begin", json!({"from": from, "to": to, "why": why}));
+        audit(
+            "switch-begin",
+            json!({"from": plan.stop, "to": plan.start, "cards": plan.cards, "why": why}),
+        );
         // 1. Drain: in-flight requests get `drain_secs` to finish.
-        if let Some(f) = &from {
-            let deadline = Instant::now() + Duration::from_secs(cfg.sched.drain_secs);
-            while self.core().inflight(f) > 0 && Instant::now() < deadline {
-                sleep(Duration::from_millis(200)).await;
-            }
+        let deadline = Instant::now() + Duration::from_secs(cfg.sched.drain_secs);
+        while plan.stop.iter().any(|f| self.core().inflight(f) > 0) && Instant::now() < deadline {
+            sleep(Duration::from_millis(200)).await;
+        }
+        for f in &plan.stop {
             let left = self.core().inflight(f);
             if left > 0 {
                 audit("drain-timeout", json!({"runtime": f, "inflight": left}));
@@ -222,23 +219,47 @@ impl<H: Host> Engine<H> {
         }
         self.core().switch_stopping();
         self.notify();
-        // 2. Stop every GPU runtime but the target (normally just `from`).
+        // 2. Stop what the plan stops, and any GPU runtime that runs without
+        // the scheduler knowing (the target too, to start it clean).
+        let mut freed: Vec<usize> = plan.cards.clone();
         for r in &cfg.runtimes {
-            let running = Some(&r.name) == from.as_ref() || self.host.is_active(&r.unit).await;
-            if !running {
+            let (planned, known) = {
+                let core = self.core();
+                let slot = core.slot(&r.name);
+                if let Some(s) = slot.filter(|_| plan.stop.contains(&r.name)) {
+                    freed.extend(&s.cards);
+                }
+                (plan.stop.contains(&r.name), slot.is_some())
+            };
+            let stray = !planned && !known && self.host.is_active(&r.unit).await;
+            if !planned && !stray {
                 continue;
+            }
+            if stray {
+                audit("stop-stray", json!({"runtime": r.name}));
             }
             if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
                 return self.fault(format!("could not stop {}: {e}", r.name));
             }
         }
-        // 3. The GPUs must be seen empty before anything else gets them.
+        freed.sort_unstable();
+        freed.dedup();
+        // 3. The cards it frees and the ones it takes must be seen empty
+        // before anything else gets them.
         let deadline = Instant::now() + Duration::from_secs(cfg.sched.vram_wait_secs);
         loop {
-            match self.host.vram_used().await {
-                Ok(used) if used.iter().all(|&m| m <= cfg.sched.vram_free_mib) => break,
-                Ok(used) if Instant::now() >= deadline => {
-                    return self.fault(format!("GPU memory still in use after stopping everything: {used:?} MiB (limit {} MiB)", cfg.sched.vram_free_mib));
+            let res = self.host.vram_used().await;
+            let busy: Result<Vec<(usize, Option<u64>)>, String> = res.map(|used| {
+                freed
+                    .iter()
+                    .map(|&c| (c, used.get(c).copied()))
+                    .filter(|(_, m)| m.is_none_or(|m| m > cfg.sched.vram_free_mib))
+                    .collect()
+            });
+            match busy {
+                Ok(b) if b.is_empty() => break,
+                Ok(b) if Instant::now() >= deadline => {
+                    return self.fault(format!("GPU memory still in use after stopping (card, MiB): {b:?} (limit {} MiB)", cfg.sched.vram_free_mib));
                 }
                 Err(e) if Instant::now() >= deadline => {
                     return self.fault(format!("cannot read GPU memory: {e}"));
@@ -246,10 +267,18 @@ impl<H: Host> Engine<H> {
                 _ => sleep(Duration::from_millis(500)).await,
             }
         }
-        // 4. Start the target and wait for it to answer.
+        // 4. Start the target on its cards and wait for it to answer.
+        let Some(to) = plan.start.as_deref() else {
+            self.core().switch_starting();
+            audit("switch-done", json!({"stopped": plan.stop, "why": why}));
+            return self.commit();
+        };
         let Some(rt) = cfg.runtime(to).cloned() else {
             return self.fault(format!("runtime {to} vanished from the config"));
         };
+        if let Err(e) = self.host.assign_cards(&rt.stack, &plan.cards).await {
+            return self.fault(format!("could not hand {to} its cards: {e}"));
+        }
         self.core().switch_starting();
         self.commit();
         let ok = match self.host.start(&rt.unit).await {
@@ -263,13 +292,16 @@ impl<H: Host> Engine<H> {
             Ok(()) => {
                 let took = started.elapsed().as_millis() as u64;
                 self.core().switch_ready(self.now(), to, took);
-                audit("switch-ready", json!({"runtime": to, "secs": took / 1000}));
+                audit(
+                    "switch-ready",
+                    json!({"runtime": to, "cards": plan.cards, "secs": took / 1000}),
+                );
                 self.commit();
             }
             Err(e) => {
                 audit("start-failed", json!({"runtime": to, "error": e}));
-                // Roll back: the failed runtime is stopped again so the GPUs
-                // are empty for whatever comes next (the last good one).
+                // Roll back: the failed runtime is stopped again so its
+                // cards are empty for whatever comes next.
                 if let Err(e) = self
                     .stop_within(&rt.unit, cfg.sched.stop_timeout_secs)
                     .await
@@ -309,33 +341,36 @@ impl<H: Host> Engine<H> {
 
     async fn check_ready(&self, health: &mut Health) {
         let cfg = self.config();
-        let Phase::Ready { rt, .. } = self.core().phase().clone() else {
-            health.failing_since = None;
-            return;
-        };
-        if Instant::now() < health.next_check {
+        let ready = self.core().ready();
+        health.failing_since.retain(|rt, _| ready.contains(rt));
+        if ready.is_empty() || Instant::now() < health.next_check {
             return;
         }
         health.next_check = Instant::now() + Duration::from_secs(5);
-        let Some(r) = cfg.runtime(&rt).cloned() else {
-            return;
-        };
-        let active = self.host.is_active(&r.unit).await;
-        if active && self.host.probe(&r.ready).await {
-            health.failing_since = None;
-            return;
+        for rt in ready {
+            let Some(r) = cfg.runtime(&rt).cloned() else {
+                continue;
+            };
+            let active = self.host.is_active(&r.unit).await;
+            if active && self.host.probe(&r.ready).await {
+                health.failing_since.remove(&rt);
+                continue;
+            }
+            let since = *health
+                .failing_since
+                .entry(rt.clone())
+                .or_insert_with(Instant::now);
+            if active && since.elapsed() < Duration::from_secs(cfg.sched.unhealthy_secs) {
+                continue;
+            }
+            audit("crashed", json!({"runtime": rt, "unit_active": active}));
+            health.failing_since.remove(&rt);
+            if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+                return self.fault(format!("{rt} stopped answering and would not stop: {e}"));
+            }
+            self.core().crashed(self.now(), &rt);
+            self.commit();
         }
-        let since = *health.failing_since.get_or_insert_with(Instant::now);
-        if active && since.elapsed() < Duration::from_secs(cfg.sched.unhealthy_secs) {
-            return;
-        }
-        audit("crashed", json!({"runtime": rt, "unit_active": active}));
-        health.failing_since = None;
-        if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
-            return self.fault(format!("{rt} stopped answering and would not stop: {e}"));
-        }
-        self.core().crashed(self.now(), &rt);
-        self.commit();
     }
 
     /// One pass over the light services: start what should run, restart what
@@ -445,14 +480,15 @@ impl<H: Host> Engine<H> {
 
 #[derive(Debug)]
 pub struct Health {
-    failing_since: Option<Instant>,
+    /// Since when each ready runtime has failed its check.
+    failing_since: BTreeMap<String, Instant>,
     next_check: Instant,
 }
 
 impl Default for Health {
     fn default() -> Self {
         Health {
-            failing_since: None,
+            failing_since: BTreeMap::new(),
             next_check: Instant::now(),
         }
     }
@@ -505,6 +541,8 @@ mod tests {
             );
             s.url_stack
                 .insert("http://127.0.0.1:9000/".into(), "dashboard".into());
+            s.url_stack
+                .insert("http://127.0.0.1:8200".into(), "mocap".into());
             f(s);
         });
         Engine::new(cfg, fake, None)
@@ -565,6 +603,73 @@ mod tests {
         assert_eq!(e.core().poll(e.now(), id), Some(Admit::Go));
     }
 
+    /// A request for `rt` as the front door makes it: admitted, the switch
+    /// runs, and it is answered.
+    async fn ask(e: &Engine<Fake>, h: &mut Health, rt: &str) {
+        let Admit::Wait(id) = e.core().admit(e.now(), rt, Class::Interactive) else {
+            panic!("{rt} admitted at once")
+        };
+        e.step(h).await;
+        assert_eq!(e.core().poll(e.now(), id), Some(Admit::Go), "{}", e.status());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_card_runtimes_run_side_by_side_on_their_own_cards() {
+        let e = engine(|_| {});
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        ask(&e, &mut h, "comfyui").await;
+        ask(&e, &mut h, "mocap").await;
+        assert!(e.core().is_ready("comfyui") && e.core().is_ready("mocap"));
+        assert_eq!(
+            e.host.log(),
+            ["start maya", "stop maya", "start comfyui", "start mocap"]
+        );
+        let cards = e.host.0.lock().unwrap().cards.clone();
+        assert_eq!((cards["comfyui"].clone(), cards["mocap"].clone()), (vec![0], vec![1]));
+        // Both stay healthy side by side.
+        settle(&e, &mut h, 20).await;
+        assert!(e.core().is_ready("comfyui") && e.core().is_ready("mocap"));
+        // One crashes: only it restarts; the other keeps its card.
+        e.host.0.lock().unwrap().active.remove("mocap");
+        settle(&e, &mut h, 30).await;
+        assert!(e.core().is_ready("comfyui"));
+        assert!(e.core().is_ready("mocap"));
+        assert!(!e.host.log().contains(&"stop comfyui".to_owned()));
+        // maya held: both go, then maya gets both cards.
+        e.core().set_hold("maya", None, "t").unwrap();
+        e.step(&mut h).await;
+        assert!(e.core().is_ready("maya"));
+        assert!(e.host.active().len() == 1);
+        // A restart of the scheduler keeps one-card runtimes on their cards.
+        e.core().release();
+        ask(&e, &mut h, "mocap").await;
+        let st = e.status();
+        assert_eq!(e.core().slot("mocap").map(|s| s.cards.clone()), Some(vec![0]), "{st}");
+        let saved = e.core().saved();
+        let path = std::env::temp_dir().join(format!("kiri-sched-adopt-{}", std::process::id()));
+        save_atomic(&path, &saved).unwrap();
+        let cfg = e.config();
+        let fake = std::mem::take(&mut *e.host.0.lock().unwrap());
+        let e2 = Engine::new(cfg, Fake(std::sync::Mutex::new(fake)), Some(path.clone()));
+        e2.reconcile().await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(e2.core().is_ready("mocap"));
+        assert_eq!(e2.core().slot("mocap").unwrap().cards, [0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn leftover_memory_on_another_card_does_not_block_a_one_card_start() {
+        let e = engine(|_| {});
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        ask(&e, &mut h, "comfyui").await;
+        // mocap's card 1 is clean; card 0 is comfyui's and in use.
+        ask(&e, &mut h, "mocap").await;
+        assert!(e.core().fault().is_none());
+        assert!(e.core().is_ready("mocap"));
+    }
+
     #[tokio::test(start_paused = true)]
     async fn failed_start_rolls_back_to_last_good() {
         let e = engine(|s| {
@@ -611,7 +716,7 @@ mod tests {
         let e = engine(|s| s.leak_mib = 9000);
         let mut h = Health::default();
         e.step(&mut h).await;
-        assert!(matches!(e.core().phase(), Phase::Fault { .. }));
+        assert!(e.core().fault().is_some());
         assert!(e.host.log().is_empty(), "nothing may start");
     }
 
@@ -624,7 +729,7 @@ mod tests {
         settle(&e, &mut h, 2).await;
         e.core().admit(e.now(), "comfyui", Class::Interactive);
         e.step(&mut h).await;
-        assert!(matches!(e.core().phase(), Phase::Fault { .. }));
+        assert!(e.core().fault().is_some());
         assert!(!e.host.active().contains("comfyui"));
     }
 
@@ -635,7 +740,7 @@ mod tests {
         settle(&e, &mut h, 2).await;
         e.host.0.lock().unwrap().active.remove("maya");
         settle(&e, &mut h, 30).await;
-        assert!(e.core().is_ready("maya"), "{:?}", e.core().phase());
+        assert!(e.core().is_ready("maya"), "{}", e.core().phase());
         assert_eq!(e.host.log(), ["start maya", "stop maya", "start maya"]);
     }
 

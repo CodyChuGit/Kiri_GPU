@@ -110,7 +110,9 @@ fn daemon(config_path: &Path) -> Result<(), String> {
     rt.block_on(async move {
         let engine = engine::Engine::new(
             cfg.clone(),
-            host::System,
+            host::System {
+                cards_dir: cfg.sched.cards_dir.clone(),
+            },
             Some(cfg.sched.state_file.clone()),
         );
         let front = server::Front::new(engine.clone());

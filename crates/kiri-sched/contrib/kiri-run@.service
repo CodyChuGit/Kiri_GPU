@@ -12,6 +12,12 @@
 # loading) the unit goes inactive at once and the scheduler sees it, instead
 # of waiting out start_timeout_secs. The containers' output lands in this
 # unit's journal.
+#
+# The scheduler writes /run/kiri-sched/cards/<stack>.env before each start,
+# `KIRI_SCHED_GPUS=1` (or `0,1`): the cards this stack got. A stack that
+# needs one card names it, and Kiri refuses any other:
+#   devices: [{driver: nvidia, device_ids: ["${KIRI_SCHED_GPUS:?}"], capabilities: [gpu]}]
+# A stack that needs every card may keep `count: all`.
 [Unit]
 Description=Kiri stack %i (run by kiri-sched)
 Requires=kiri.service
@@ -24,6 +30,7 @@ Type=exec
 WorkingDirectory=/box/config/kiri/stacks/%i
 Environment=DOCKER_HOST=unix:///run/kiri/docker.sock
 Environment=COMPOSE_PROJECT_NAME=%i
+EnvironmentFile=-/run/kiri-sched/cards/%i.env
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S /run/kiri/docker.sock ] && exit 0; sleep 1; done; exit 1'
 ExecStart=/opt/box/bin/kiri-compose up --remove-orphans --abort-on-container-exit --no-color
 ExecStop=/opt/box/bin/kiri-compose down --timeout 60

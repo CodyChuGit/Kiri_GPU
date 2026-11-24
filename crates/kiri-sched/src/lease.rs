@@ -19,7 +19,13 @@ pub fn answer<H: Host>(engine: &Engine<H>, line: &str) -> Value {
     if q["op"] != "gpu-start" {
         return json!({"ok": false, "reason": "unknown op"});
     }
-    let verdict = engine.core().lease_ok(&q["labels"]);
+    let devices: Vec<String> = q["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.as_str().map(str::to_owned))
+        .collect();
+    let verdict = engine.core().lease_ok(&q["labels"], &devices);
     match verdict {
         Ok(()) => {
             audit(
@@ -77,9 +83,12 @@ mod tests {
         assert_eq!(answer(&e, q)["ok"], false, "nothing holds the GPUs yet");
         {
             let mut c = e.core();
-            c.switch_begin("maya");
+            let p = c.want_switch(0).unwrap();
+            c.switch_begin(&p);
             c.switch_starting();
         }
         assert_eq!(answer(&e, q)["ok"], true);
+        let other = q.replace("maya", "comfyui");
+        assert_eq!(answer(&e, &other)["ok"], false);
     }
 }
