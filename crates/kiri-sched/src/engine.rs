@@ -637,12 +637,16 @@ mod tests {
         assert!(e.core().is_ready("mocap"));
         assert!(!e.host.log().contains(&"stop comfyui".to_owned()));
         // maya held: both go, then maya gets both cards.
-        e.core().set_hold("maya", None, "t").unwrap();
+        let now = e.now();
+        e.core()
+            .set_hold(now, "maya", crate::core::HoldFor::Until(None), "t", false)
+            .unwrap();
         e.step(&mut h).await;
         assert!(e.core().is_ready("maya"));
         assert!(e.host.active().len() == 1);
         // A restart of the scheduler keeps one-card runtimes on their cards.
-        e.core().release();
+        let now = e.now();
+        e.core().release(now, Some("maya"), "x", false).unwrap();
         ask(&e, &mut h, "mocap").await;
         let st = e.status();
         assert_eq!(e.core().slot("mocap").map(|s| s.cards.clone()), Some(vec![0]), "{st}");

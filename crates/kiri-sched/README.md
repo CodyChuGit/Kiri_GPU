@@ -69,14 +69,22 @@ anything the scheduler did not grant.
 
 ```
 kiri-sched status                  # JSON: gpus (who holds each card), runtimes, phase, hold, waiting, services
-kiri-sched use comfyui             # switch now and keep it for the dwell time
-kiri-sched use comfyui 45          # … for 45 minutes
+kiri-sched use comfyui             # switch now; keep it for the dwell time once it is ready
+kiri-sched use comfyui 45 --by lab # … for 45 minutes after ready, held as admin-socket:lab
 kiri-sched hold desktop            # hold until release
-kiri-sched release
+kiri-sched release desktop         # name the held runtime (or be its named owner, or --force)
 kiri-sched unfence maya-glm
 kiri-sched reset                   # after a fault, once the GPUs were checked
 kiri-sched hash-token < token      # for [[client]] token_sha256
 ```
+
+A `use` or `hold` of another runtime while someone else's hold lasts is
+refused with 409 and who holds it, instead of quietly replacing it; pass
+`--force` to take over. `use` answers with the runtime's state (`ready`,
+or `starting`/`stopped` while it switches); its time only starts once the
+runtime is ready, and a `use` whose runtime is not ready within its start
+timeout (plus the switch's own timeouts) is given up. Scripts should name
+themselves with `--by NAME` (or `KIRI_SCHED_BY=NAME`).
 
 Every request needs a client token (`Authorization: Bearer …` or
 `x-api-key`). With one, `GET /box/status`, `GET /box/events` (server-sent

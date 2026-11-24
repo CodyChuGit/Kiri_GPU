@@ -39,20 +39,29 @@ const DEFAULT_CONFIG: &str = "/etc/kiri-sched/sched.toml";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (config, rest) = split_config(&args);
+    let (config, rest, extra) = split_config(&args);
+    let q = |path: String| -> String {
+        if extra.is_empty() {
+            path
+        } else {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            format!("{path}{sep}{extra}")
+        }
+    };
     let result = match rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["daemon"] => daemon(&config),
         ["check-config"] => load(&config).map(|c| println!("ok: {} runtimes, {} services, {} clients", c.runtimes.len(), c.services.len(), c.clients.len())),
         ["hash-token"] => hash_token(),
         ["status"] => admin(&config, "GET", "/box/status"),
-        ["release"] => admin(&config, "POST", "/box/release"),
+        ["release"] => admin(&config, "POST", &q("/box/release".into())),
+        ["release", rt] => admin(&config, "POST", &q(format!("/box/release/{rt}"))),
         ["reset"] => admin(&config, "POST", "/box/reset"),
-        ["use", rt] => admin(&config, "POST", &format!("/box/use/{rt}")),
-        ["use", rt, m] => admin(&config, "POST", &format!("/box/use/{rt}?minutes={m}")),
-        ["hold", rt] => admin(&config, "POST", &format!("/box/hold/{rt}")),
-        ["hold", rt, m] => admin(&config, "POST", &format!("/box/hold/{rt}?minutes={m}")),
+        ["use", rt] => admin(&config, "POST", &q(format!("/box/use/{rt}"))),
+        ["use", rt, m] => admin(&config, "POST", &q(format!("/box/use/{rt}?minutes={m}"))),
+        ["hold", rt] => admin(&config, "POST", &q(format!("/box/hold/{rt}"))),
+        ["hold", rt, m] => admin(&config, "POST", &q(format!("/box/hold/{rt}?minutes={m}"))),
         ["unfence", name] => admin(&config, "POST", &format!("/box/unfence/{name}")),
-        _ => Err("usage: kiri-sched [-c config] daemon | check-config | hash-token | status | use <rt> [min] | hold <rt> [min] | release | unfence <name> | reset".into()),
+        _ => Err("usage: kiri-sched [-c config] daemon | check-config | hash-token | status | use <rt> [min] | hold <rt> [min] | release [rt] | unfence <name> | reset  (use/hold/release take --by NAME, default $KIRI_SCHED_BY, and --force)".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -63,20 +72,40 @@ fn main() -> ExitCode {
     }
 }
 
-fn split_config(args: &[String]) -> (PathBuf, Vec<String>) {
+/// The config path, the command words, and the query the hold flags add
+/// (`--by NAME`, else `$KIRI_SCHED_BY`; `--force`).
+fn split_config(args: &[String]) -> (PathBuf, Vec<String>, String) {
     let mut config = PathBuf::from(DEFAULT_CONFIG);
     let mut rest = Vec::new();
+    let mut by = std::env::var("KIRI_SCHED_BY").ok().filter(|b| !b.is_empty());
+    let mut force = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == "-c" || a == "--config" {
             if let Some(p) = it.next() {
                 config = p.into();
             }
+        } else if a == "--by" {
+            by = it.next().cloned();
+        } else if a == "--force" {
+            force = true;
         } else {
             rest.push(a.clone());
         }
     }
-    (config, rest)
+    let mut extra = Vec::new();
+    if let Some(b) = by {
+        // The daemon keeps only [A-Za-z0-9-_.] names; anything else is dropped there.
+        let safe: String = b
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c))
+            .collect();
+        extra.push(format!("by={safe}"));
+    }
+    if force {
+        extra.push("force=1".into());
+    }
+    (config, rest, extra.join("&"))
 }
 
 fn load(path: &Path) -> Result<config::Config, String> {

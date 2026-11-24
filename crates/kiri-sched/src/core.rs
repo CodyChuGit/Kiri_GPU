@@ -69,10 +69,30 @@ pub struct Plan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hold {
     pub rt: String,
-    /// Unix ms; `None` holds until released.
+    /// Unix ms; `None` holds until released (or, with `after_ready_secs`,
+    /// until its runtime is ready and that long has passed).
     pub until: Option<u64>,
     pub by: String,
+    /// A `use`: the hold's time starts when its runtime is ready, so a slow
+    /// load or a switch that waits does not eat it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_ready_secs: Option<u64>,
+    /// A `use` whose runtime is not ready by then is given up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_by: Option<u64>,
 }
+
+/// How long a hold lasts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldFor {
+    /// Until this Unix ms, or until released.
+    Until(Option<u64>),
+    /// This many seconds once its runtime is ready (`use`).
+    AfterReady(u64),
+}
+
+/// A refused admin action: HTTP status and reason.
+pub type Refusal = (u16, String);
 
 /// What survives a restart of the scheduler (and of the box).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -258,9 +278,22 @@ impl Core {
     }
 
     fn active_hold(&self, now: u64) -> Option<&Hold> {
-        self.hold
-            .as_ref()
-            .filter(|h| h.until.is_none_or(|t| t > now))
+        self.hold.as_ref().filter(|h| match (h.after_ready_secs, h.until) {
+            (Some(_), None) => h.start_by.is_none_or(|t| t > now),
+            (_, until) => until.is_none_or(|t| t > now),
+        })
+    }
+
+    /// A `use` hold starts its clock once its runtime is ready.
+    fn arm_hold(&mut self, now: u64, rt: &str) {
+        if let Some(h) = &mut self.hold
+            && h.rt == rt
+            && h.until.is_none()
+            && let Some(secs) = h.after_ready_secs.take()
+        {
+            h.until = Some(now + secs * 1000);
+            h.start_by = None;
+        }
     }
 
     /// A hold refuses only the runtimes that cannot run beside it.
@@ -475,14 +508,13 @@ impl Core {
         if self.trans.is_some() || self.fault.is_some() {
             return None;
         }
-        if self
-            .hold
-            .as_ref()
-            .is_some_and(|h| h.until.is_some_and(|t| t <= now))
+        self.fenced.retain(|_, t| *t > now);
+        let fenced = |h: &Hold| h.after_ready_secs.is_some() && self.fenced.contains_key(&h.rt);
+        if self.hold.is_some()
+            && (self.active_hold(now).is_none() || self.hold.as_ref().is_some_and(fenced))
         {
             self.hold = None;
         }
-        self.fenced.retain(|_, t| *t > now);
         // The idle clock of each ready runtime with an idle limit starts
         // when it is first seen with nothing to do.
         let hold = self.active_hold(now).map(|h| h.rt.clone());
@@ -683,6 +715,7 @@ impl Core {
             self.switch_ms.insert(rt.to_owned(), took_ms);
             self.fails.remove(rt);
             self.backoff.remove(rt);
+            self.arm_hold(now, rt);
         }
         self.trans = None;
     }
@@ -744,6 +777,7 @@ impl Core {
                 },
             );
             self.last_good = Some(rt.to_owned());
+            self.arm_hold(now, rt);
         }
         ok
     }
@@ -780,20 +814,105 @@ impl Core {
         self.fault.take().is_some()
     }
 
-    pub fn set_hold(&mut self, rt: &str, until: Option<u64>, by: &str) -> Result<(), String> {
-        if self.cfg.runtime(rt).is_none() {
-            return Err(format!("no runtime {rt}"));
+    /// Holds the GPUs for `rt`. Refused (409) while another runtime is
+    /// held by someone else, unless `force`: a hold is never replaced by
+    /// accident. The same caller, or anyone holding the same runtime,
+    /// changes it freely.
+    pub fn set_hold(
+        &mut self,
+        now: u64,
+        rt: &str,
+        hold_for: HoldFor,
+        by: &str,
+        force: bool,
+    ) -> Result<(), Refusal> {
+        let Some(r) = self.cfg.runtime(rt) else {
+            return Err((404, format!("no runtime {rt}")));
+        };
+        if let Some(t) = self.fenced_until(rt, now) {
+            return Err((
+                503,
+                format!("{rt} is fenced until {t} after failing to start; kiri-sched unfence {rt} first"),
+            ));
         }
-        self.hold = Some(Hold {
-            rt: rt.to_owned(),
-            until,
-            by: by.to_owned(),
+        if let Some(reason) = &self.fault {
+            return Err((503, format!("GPU fault, nothing switches until kiri-sched reset: {reason}")));
+        }
+        if let Some(h) = self.active_hold(now)
+            && h.rt != rt
+            && h.by != by
+            && !force
+        {
+            return Err((409, format!(
+                "the GPUs are held for {} by {}{}; wait, ask them to release it, or pass --force",
+                h.rt,
+                h.by,
+                h.until.map_or_else(String::new, |t| format!(" until {t}"))
+            )));
+        }
+        let s = &self.cfg.sched;
+        self.hold = Some(match hold_for {
+            HoldFor::Until(until) => Hold {
+                rt: rt.to_owned(),
+                until,
+                by: by.to_owned(),
+                after_ready_secs: None,
+                start_by: None,
+            },
+            HoldFor::AfterReady(secs) => Hold {
+                rt: rt.to_owned(),
+                until: None,
+                by: by.to_owned(),
+                after_ready_secs: Some(secs),
+                start_by: Some(
+                    now + (s.drain_secs + s.stop_timeout_secs + s.vram_wait_secs
+                        + r.start_timeout_secs
+                        + 60)
+                        * 1000,
+                ),
+            },
         });
+        if self.is_ready(rt) {
+            self.arm_hold(now, rt);
+        }
         Ok(())
     }
 
-    pub fn release(&mut self) -> Option<Hold> {
-        self.hold.take()
+    /// Ends the hold. Refused (409) unless the caller names the held
+    /// runtime, set the hold itself under a name, or passes `force`.
+    pub fn release(
+        &mut self,
+        now: u64,
+        rt: Option<&str>,
+        by: &str,
+        force: bool,
+    ) -> Result<Option<Hold>, Refusal> {
+        let Some(h) = self.active_hold(now) else {
+            return Ok(self.hold.take());
+        };
+        // A bare admin-socket caller is anyone on the box: it must name the
+        // runtime. A named caller may release its own hold.
+        let own = h.by == by && by != "admin-socket";
+        if force || own || rt == Some(h.rt.as_str()) {
+            return Ok(self.hold.take());
+        }
+        Err((409, format!(
+            "the GPUs are held for {} by {}; release {} names it (kiri-sched release {}), or pass --force",
+            h.rt, h.by, h.rt, h.rt
+        )))
+    }
+
+    /// The state of one runtime, as status shows it.
+    pub fn state_of(&self, rt: &str, now: u64) -> &'static str {
+        if self.fenced_until(rt, now).is_some() {
+            "fenced"
+        } else if let Some(s) = self.running.get(rt) {
+            s.state.name()
+        } else if self.backoff.get(rt).is_some_and(|&t| t > now) {
+            "backoff"
+        } else {
+            "stopped"
+        }
     }
 
     #[cfg(test)]
@@ -931,15 +1050,7 @@ impl Core {
             .iter()
             .map(|r| {
                 let slot = self.running.get(&r.name);
-                let state = if self.fenced_until(&r.name, now).is_some() {
-                    "fenced"
-                } else if let Some(s) = slot {
-                    s.state.name()
-                } else if self.backoff.get(&r.name).is_some_and(|&t| t > now) {
-                    "backoff"
-                } else {
-                    "stopped"
-                };
+                let state = self.state_of(&r.name, now);
                 json!({
                     "name": r.name,
                     "state": state,
@@ -1111,7 +1222,7 @@ mod tests {
     fn an_idle_render_server_gives_the_gpus_back_to_home() {
         let mut c = core();
         switch_ok(&mut c, 0);
-        c.set_hold("comfyui", Some(100 * S), "cody").unwrap();
+        c.set_hold(0, "comfyui", HoldFor::Until(Some(100 * S)), "cody", false).unwrap();
         assert_eq!(switch_ok(&mut c, S), "comfyui");
         // Held, then busy: it stays.
         assert_eq!(c.want_switch(99 * S), None);
@@ -1225,7 +1336,7 @@ mod tests {
         let mut c = core();
         switch_ok(&mut c, 0);
         c.begin("maya");
-        c.set_hold("comfyui", Some(3600 * S), "cody").unwrap();
+        c.set_hold(0, "comfyui", HoldFor::Until(Some(3600 * S)), "cody", false).unwrap();
         // A hold evicts even a busy runtime that has not dwelt.
         let p = c.want_switch(S).unwrap();
         assert_eq!(p.start.as_deref(), Some("comfyui"));
@@ -1270,7 +1381,7 @@ mod tests {
         switch_ok(&mut c, 0);
         c.begin("comfyui");
         c.begin("mocap");
-        c.set_hold("maya", None, "cody").unwrap();
+        c.set_hold(0, "maya", HoldFor::Until(None), "cody", false).unwrap();
         let p = c.want_switch(S).unwrap();
         assert_eq!(p.start.as_deref(), Some("maya"));
         assert_eq!(p.cards, [0, 1]);
@@ -1397,7 +1508,7 @@ mod tests {
     #[test]
     fn saved_state_comes_back() {
         let mut c = core();
-        c.set_hold("comfyui", None, "cody").unwrap();
+        c.set_hold(0, "comfyui", HoldFor::Until(None), "cody", false).unwrap();
         assert_eq!(switch_ok(&mut c, 0), "comfyui");
         let saved: Saved =
             serde_json::from_value(serde_json::to_value(c.saved()).unwrap()).unwrap();
@@ -1417,11 +1528,63 @@ mod tests {
                 rt: "gone".into(),
                 until: None,
                 by: "x".into(),
+                after_ready_secs: None,
+                start_by: None,
             }),
             ..Saved::default()
         };
         let c = Core::new(Arc::new(Config::parse(EXAMPLE).unwrap()), old);
         assert!(c.hold(0).is_none());
+    }
+
+    #[test]
+    fn a_use_counts_its_time_from_ready_and_is_never_replaced_by_accident() {
+        let mut c = core();
+        switch_ok(&mut c, 0);
+        // `use comfyui` for 180 s while maya is still loading something
+        // slow: the time does not run until comfyui is ready.
+        c.set_hold(0, "comfyui", HoldFor::AfterReady(180), "admin-socket:lab", false)
+            .unwrap();
+        let p = c.want_switch(S).unwrap();
+        c.switch_begin(&p);
+        c.switch_stopping();
+        c.switch_starting();
+        // Loading takes 800 s, far past the 180 s.
+        assert!(c.want_switch(800 * S).is_none());
+        assert!(c.hold(800 * S).is_some(), "the hold waits for ready");
+        c.switch_ready(800 * S, "comfyui", 799 * S);
+        assert_eq!(c.hold(900 * S).unwrap().until, Some(980 * S));
+        // Someone else's use of another runtime is refused, not silently
+        // taking over; the same runtime, the owner, or --force may.
+        let e = c
+            .set_hold(901 * S, "maya", HoldFor::AfterReady(60), "admin-socket", false)
+            .unwrap_err();
+        assert_eq!(e.0, 409);
+        assert!(e.1.contains("comfyui by admin-socket:lab"), "{}", e.1);
+        assert!(c.set_hold(901 * S, "comfyui", HoldFor::AfterReady(600), "admin-socket", false).is_ok());
+        c.set_hold(901 * S, "comfyui", HoldFor::Until(Some(2000 * S)), "admin-socket:lab", false)
+            .unwrap();
+        assert!(c.set_hold(902 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).is_ok());
+        // Release: a bare caller must name the runtime; the owner need not.
+        assert_eq!(c.release(903 * S, None, "admin-socket", false).unwrap_err().0, 409);
+        assert_eq!(c.release(903 * S, None, "admin-socket:other", false).unwrap_err().0, 409);
+        assert!(c.release(903 * S, None, "admin-socket:lab", false).unwrap().is_some());
+        c.set_hold(904 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap();
+        assert!(c.release(905 * S, Some("maya"), "admin-socket", false).unwrap().is_some());
+        c.set_hold(904 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap();
+        assert!(c.release(905 * S, None, "admin-socket", true).unwrap().is_some());
+        // A use of a runtime that never gets ready is given up in time.
+        c.set_hold(1000 * S, "mocap", HoldFor::AfterReady(60), "t", false).unwrap();
+        let p = c.want_switch(1000 * S).unwrap();
+        c.switch_begin(&p);
+        c.switch_starting();
+        c.switch_failed(1000 * S, "mocap");
+        assert!(c.hold(1500 * S).is_some());
+        assert!(c.want_switch(5000 * S).is_some());
+        assert!(c.hold(5000 * S).is_none(), "start_by passed");
+        // Fenced or faulted: use is refused outright.
+        c.fault = Some("x".into());
+        assert_eq!(c.set_hold(5000 * S, "maya", HoldFor::AfterReady(60), "t", false).unwrap_err().0, 503);
     }
 
     /// A long random run of requests, completions, holds, failures and
@@ -1469,10 +1632,15 @@ mod tests {
                     }
                     5 => {
                         if next(4) == 0 {
-                            let _ =
-                                c.set_hold(rts[next(3) as usize], Some(now + next(600) * S), "t");
+                            let _ = c.set_hold(
+                                now,
+                                rts[next(3) as usize],
+                                HoldFor::Until(Some(now + next(600) * S)),
+                                "t",
+                                next(2) == 0,
+                            );
                         } else {
-                            c.release();
+                            let _ = c.release(now, None, "t", false);
                         }
                     }
                     6 => {
