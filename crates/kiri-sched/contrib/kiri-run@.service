@@ -33,9 +33,11 @@ Environment=COMPOSE_PROJECT_NAME=%i
 EnvironmentFile=-/run/kiri-sched/cards/%i.env
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S /run/kiri/docker.sock ] && exit 0; sleep 1; done; exit 1'
 ExecStart=/opt/box/bin/kiri-compose up --remove-orphans --abort-on-container-exit --no-color
-ExecStop=/opt/box/bin/kiri-compose down --timeout 60
+# No --timeout: each service's stop_grace_period applies (Compose default
+# 10 s), and TimeoutStopSec bounds the whole stop.
+ExecStop=/opt/box/bin/kiri-compose down
 # Also after the stack ended on its own: nothing exited is left behind.
-ExecStopPost=/opt/box/bin/kiri-compose down --timeout 60
+ExecStopPost=/opt/box/bin/kiri-compose down
 Restart=no
 TimeoutStartSec=180
 TimeoutStopSec=90

@@ -14,7 +14,7 @@ services:
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       KIRI_SCHED_GPUS: ${KIRI_SCHED_GPUS:?set by kiri-sched}
-    command: ["sh", "-c", "mkdir -p /tmp/out && { echo \"card $$KIRI_SCHED_GPUS\"; nvidia-smi -L; nvidia-smi --query-gpu=index,pci.bus_id,uuid --format=csv,noheader; } > /tmp/out/gpus.txt 2>&1; cd /tmp/out && python3 -m http.server 8193 --bind 127.0.0.1"]
+    command: ["sh", "-c", "mkdir -p /tmp/out && { echo \"card $$KIRI_SCHED_GPUS\"; nvidia-smi -L; nvidia-smi --query-gpu=index,pci.bus_id,uuid --format=csv,noheader; } > /tmp/out/gpus.txt 2>&1; cd /tmp/out && exec python3 -m http.server 8193 --bind 127.0.0.1"]
     deploy:
       resources:
         reservations:

@@ -216,6 +216,8 @@ pub mod fake {
         pub url_stack: BTreeMap<String, String>,
         /// The cards each stack was handed last.
         pub cards: BTreeMap<String, Vec<usize>>,
+        /// How long a stop takes, seconds (tokio's clock).
+        pub stop_secs: u64,
     }
 
     #[derive(Debug, Default)]
@@ -253,6 +255,8 @@ pub mod fake {
         }
         async fn stop(&self, unit: &str) -> Result<(), String> {
             let stack = short(unit);
+            let wait = self.0.lock().unwrap().stop_secs;
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             let mut s = self.0.lock().unwrap();
             s.log.push(format!("stop {stack}"));
             if s.stop_fails.contains(stack) {

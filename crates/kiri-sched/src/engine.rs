@@ -222,6 +222,7 @@ impl<H: Host> Engine<H> {
         // 2. Stop what the plan stops, and any GPU runtime that runs without
         // the scheduler knowing (the target too, to start it clean).
         let mut freed: Vec<usize> = plan.cards.clone();
+        let mut to_stop = Vec::new();
         for r in &cfg.runtimes {
             let (planned, known) = {
                 let core = self.core();
@@ -232,13 +233,25 @@ impl<H: Host> Engine<H> {
                 (plan.stop.contains(&r.name), slot.is_some())
             };
             let stray = !planned && !known && self.host.is_active(&r.unit).await;
-            if !planned && !stray {
-                continue;
-            }
             if stray {
                 audit("stop-stray", json!({"runtime": r.name}));
             }
-            if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+            if planned || stray {
+                to_stop.push(r);
+            }
+        }
+        // All at once: two one-card runtimes giving way to a two-card one
+        // cost one stop, not two.
+        let secs = cfg.sched.stop_timeout_secs;
+        let results = join_all(
+            to_stop
+                .iter()
+                .map(|r| Box::pin(self.stop_within(&r.unit, secs)) as StopFut<'_>)
+                .collect(),
+        )
+        .await;
+        for (r, res) in to_stop.iter().zip(results) {
+            if let Err(e) = res {
                 return self.fault(format!("could not stop {}: {e}", r.name));
             }
         }
@@ -478,6 +491,31 @@ impl<H: Host> Engine<H> {
     }
 }
 
+type StopFut<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Runs the futures together; their results in order.
+async fn join_all(mut futs: Vec<StopFut<'_>>) -> Vec<Result<(), String>> {
+    let mut out: Vec<Option<Result<(), String>>> = futs.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (f, o) in futs.iter_mut().zip(out.iter_mut()) {
+            if o.is_none() {
+                match f.as_mut().poll(cx) {
+                    std::task::Poll::Ready(r) => *o = Some(r),
+                    std::task::Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
+    out.into_iter().map(|o| o.unwrap_or(Ok(()))).collect()
+}
+
 #[derive(Debug)]
 pub struct Health {
     /// Since when each ready runtime has failed its check.
@@ -660,6 +698,25 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert!(e2.core().is_ready("mocap"));
         assert_eq!(e2.core().slot("mocap").unwrap().cards, [0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn evicted_runtimes_stop_together() {
+        let e = engine(|_| {});
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        ask(&e, &mut h, "comfyui").await;
+        ask(&e, &mut h, "mocap").await;
+        e.host.0.lock().unwrap().stop_secs = 30;
+        let now = e.now();
+        e.core()
+            .set_hold(now, "maya", crate::core::HoldFor::Until(None), "t", false)
+            .unwrap();
+        let t = Instant::now();
+        e.step(&mut h).await;
+        assert!(e.core().is_ready("maya"));
+        let took = t.elapsed();
+        assert!(took < Duration::from_secs(45), "stopped one after another: {took:?}");
     }
 
     #[tokio::test(start_paused = true)]
