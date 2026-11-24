@@ -157,6 +157,7 @@ impl<H: Host> Engine<H> {
                 json!({"runtime": r.name, "why": "running at startup but not answering, or on cards it cannot keep"}),
             );
             if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+                self.core().stuck(&r.name);
                 self.core()
                     .switch_fault(format!("could not stop {} at startup: {e}", r.name));
                 audit("fault", json!({"reason": e}));
@@ -177,6 +178,9 @@ impl<H: Host> Engine<H> {
     /// One pass of the main loop: start a switch if one is due, else check
     /// the runtimes on the GPUs.
     pub async fn step(&self, health: &mut Health) {
+        if self.resolve_stuck().await {
+            return;
+        }
         let plan = {
             let mut core = self.core();
             let plan = core.want_switch(self.now());
@@ -195,6 +199,51 @@ impl<H: Host> Engine<H> {
             }
             None => self.check_ready(health).await,
         }
+    }
+
+    /// After a fault is reset: look at each runtime whose stop failed. One
+    /// that is gone frees its cards; one that runs and answers is ready
+    /// again; one that runs and does not answer is stopped again (or the
+    /// fault comes back). `true` while any is still stuck.
+    async fn resolve_stuck(&self) -> bool {
+        let stuck = {
+            let core = self.core();
+            if core.fault().is_some() {
+                return false;
+            }
+            core.stuck_list()
+        };
+        if stuck.is_empty() {
+            return false;
+        }
+        let cfg = self.config();
+        for rt in stuck {
+            let Some(r) = cfg.runtime(&rt).cloned() else {
+                self.core().unstuck_stopped(&rt);
+                continue;
+            };
+            let active = self.host.is_active(&r.unit).await;
+            if active && self.host.probe(&r.ready).await {
+                audit("unstuck", json!({"runtime": rt, "now": "ready"}));
+                self.core().unstuck_ready(self.now(), &rt);
+            } else if !active {
+                audit("unstuck", json!({"runtime": rt, "now": "stopped"}));
+                self.core().unstuck_stopped(&rt);
+            } else {
+                match self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+                    Ok(()) => {
+                        audit("unstuck", json!({"runtime": rt, "now": "stopped"}));
+                        self.core().unstuck_stopped(&rt);
+                    }
+                    Err(e) => {
+                        self.fault(format!("{rt} still would not stop: {e}"));
+                        return true;
+                    }
+                }
+            }
+        }
+        self.commit();
+        !self.core().stuck_list().is_empty()
     }
 
     /// The switch sequence; `core.switch_begin` was called.
@@ -250,10 +299,19 @@ impl<H: Host> Engine<H> {
                 .collect(),
         )
         .await;
+        let mut failed = Vec::new();
         for (r, res) in to_stop.iter().zip(results) {
             if let Err(e) = res {
-                return self.fault(format!("could not stop {}: {e}", r.name));
+                // A stray is not in the scheduler's state: it is counted on
+                // every card until someone looks.
+                if !plan.stop.contains(&r.name) {
+                    self.core().stuck(&r.name);
+                }
+                failed.push(format!("{}: {e}", r.name));
             }
+        }
+        if !failed.is_empty() {
+            return self.fault(format!("could not stop {}", failed.join("; ")));
         }
         freed.sort_unstable();
         freed.dedup();
@@ -379,6 +437,7 @@ impl<H: Host> Engine<H> {
             audit("crashed", json!({"runtime": rt, "unit_active": active}));
             health.failing_since.remove(&rt);
             if let Err(e) = self.stop_within(&r.unit, cfg.sched.stop_timeout_secs).await {
+                self.core().stuck(&rt);
                 return self.fault(format!("{rt} stopped answering and would not stop: {e}"));
             }
             self.core().crashed(self.now(), &rt);
@@ -792,6 +851,39 @@ mod tests {
         e.step(&mut h).await;
         assert!(e.core().fault().is_some());
         assert!(!e.host.active().contains("comfyui"));
+        // maya may still be running: its cards are not shown free.
+        let st = e.status();
+        assert_eq!(st["gpus"][0]["runtime"], "maya", "{st}");
+        assert_eq!(st["gpus"][0]["state"], "stuck");
+        assert_eq!(st["gpus"][1]["state"], "stuck");
+        // Nothing starts during the fault, however long.
+        settle(&e, &mut h, 20).await;
+        assert_eq!(e.host.log(), ["start maya", "stop maya"]);
+        // After a reset, a maya that still runs and answers is ready again
+        // on its cards, not restarted.
+        e.core().reset();
+        e.host.0.lock().unwrap().stop_fails.clear();
+        e.core().forget(1);
+        e.step(&mut h).await;
+        assert!(e.core().is_ready("maya"), "{}", e.status());
+        assert_eq!(e.host.log(), ["start maya", "stop maya"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stuck_runtime_that_did_stop_frees_its_cards_after_reset() {
+        let e = engine(|s| {
+            s.stop_fails.insert("maya".into());
+        });
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        e.core().admit(e.now(), "comfyui", Class::Interactive);
+        e.step(&mut h).await;
+        assert!(e.core().fault().is_some());
+        // It stopped late, on its own.
+        e.host.0.lock().unwrap().active.remove("maya");
+        e.core().reset();
+        settle(&e, &mut h, 3).await;
+        assert!(e.core().is_ready("comfyui"), "{}", e.status());
     }
 
     #[tokio::test(start_paused = true)]
