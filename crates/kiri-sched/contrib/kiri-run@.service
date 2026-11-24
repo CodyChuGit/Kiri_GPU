@@ -6,6 +6,12 @@
 #
 # In GPU stacks set `restart: "no"` on every service: restarts are the
 # scheduler's job, and Kiri refuses a GPU start the scheduler did not grant.
+#
+# `compose up` stays attached, so the unit lives exactly as long as the
+# stack: when a container exits (a crash, or an engine that dies while
+# loading) the unit goes inactive at once and the scheduler sees it, instead
+# of waiting out start_timeout_secs. The containers' output lands in this
+# unit's journal.
 [Unit]
 Description=Kiri stack %i (run by kiri-sched)
 Requires=kiri.service
@@ -14,12 +20,15 @@ RequiresMountsFor=/box /models
 ConditionPathExists=/box/config/kiri/stacks/%i/compose.yaml
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=exec
 WorkingDirectory=/box/config/kiri/stacks/%i
 Environment=DOCKER_HOST=unix:///run/kiri/docker.sock
 Environment=COMPOSE_PROJECT_NAME=%i
-ExecStart=/opt/box/bin/kiri-compose up --detach --remove-orphans
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S /run/kiri/docker.sock ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/opt/box/bin/kiri-compose up --remove-orphans --abort-on-container-exit --no-color
 ExecStop=/opt/box/bin/kiri-compose down --timeout 60
+# Also after the stack ended on its own: nothing exited is left behind.
+ExecStopPost=/opt/box/bin/kiri-compose down --timeout 60
+Restart=no
 TimeoutStartSec=180
 TimeoutStopSec=90

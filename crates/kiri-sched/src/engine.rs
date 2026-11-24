@@ -591,6 +591,22 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_runtime_that_dies_while_loading_fails_fast() {
+        let e = engine(|s| {
+            s.exits_on_start.insert("comfyui".into());
+        });
+        let mut h = Health::default();
+        settle(&e, &mut h, 2).await;
+        e.core().admit(e.now(), "comfyui", Class::Interactive);
+        let t = Instant::now();
+        e.step(&mut h).await;
+        // Its unit ended: given up after the short grace, not start_timeout_secs.
+        assert!(t.elapsed() < Duration::from_secs(30), "{:?}", t.elapsed());
+        e.step(&mut h).await;
+        assert!(e.core().is_ready("maya"));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn leftover_gpu_memory_is_a_fault() {
         let e = engine(|s| s.leak_mib = 9000);
         let mut h = Health::default();

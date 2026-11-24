@@ -162,6 +162,8 @@ pub mod fake {
         pub active: BTreeSet<String>,
         /// Stacks that start but never become ready.
         pub never_ready: BTreeSet<String>,
+        /// Stacks whose container exits while starting (the unit ends).
+        pub exits_on_start: BTreeSet<String>,
         /// Stacks whose stop fails.
         pub stop_fails: BTreeSet<String>,
         /// Memory left on the GPUs after a stop, MiB.
@@ -202,7 +204,9 @@ pub mod fake {
             let stack = short(unit);
             let mut s = self.0.lock().unwrap();
             s.log.push(format!("start {stack}"));
-            s.active.insert(stack.to_owned());
+            if !s.exits_on_start.contains(stack) {
+                s.active.insert(stack.to_owned());
+            }
             Ok(())
         }
         async fn stop(&self, unit: &str) -> Result<(), String> {
