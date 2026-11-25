@@ -68,7 +68,7 @@ anything the scheduler did not grant.
 ## Use
 
 ```
-kiri-sched status                  # JSON: gpus (who holds each card), runtimes, phase, hold, waiting, services
+kiri-sched status                  # JSON: gpus (who holds each card), runtimes, phase, hold, holds, waiting, services
 kiri-sched use comfyui             # switch now; keep it for the dwell time once it is ready
 kiri-sched use comfyui 45 --by lab # … for 45 minutes after ready, held as admin-socket:lab
 kiri-sched hold desktop            # hold until release
@@ -78,9 +78,17 @@ kiri-sched reset                   # after a fault, once the GPUs were checked
 kiri-sched hash-token < token      # for [[client]] token_sha256
 ```
 
-A `use` or `hold` of another runtime while someone else's hold lasts is
-refused with 409 and who holds it, instead of quietly replacing it; pass
-`--force` to take over. `use` answers with the runtime's state (`ready`,
+Each card can carry its own hold: two one-card runtimes may be held at
+once by different callers (`hold comfyui --by render` and `hold mocap
+--by mocap-job`), and a two-card runtime can be held only when no other
+hold is in the way. A `use` or `hold` that cannot fit beside the holds
+already there is refused with 409 naming them, instead of quietly
+replacing them; `--force` drops only the holds in the way (newest first)
+and keeps the rest. A named caller's new hold replaces its own earlier
+ones; a caller with no `--by` replaces only its own earlier unnamed holds
+that are in the way (so `use deepseek` then `use qwen` still switches). `release <rt>` ends the holds on that runtime; a bare `release`
+ends the caller's own holds (`--force`: all of them), and a caller with
+no `--by` must name the runtime. `use` answers with the runtime's state (`ready`,
 or `starting`/`stopped` while it switches); its time only starts once the
 runtime is ready, and a `use` whose runtime is not ready within its start
 timeout (plus the switch's own timeouts) is given up. Scripts should name

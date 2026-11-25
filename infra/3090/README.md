@@ -118,8 +118,9 @@ Tailscale.
 ```sh
 kiri-sched status                     # who holds the GPUs, queue, faults
 kiri-sched use maya-deepseek [min]    # switch now (and keep it that long)
-kiri-sched hold <runtime> [min]       # nothing evicts it until release
-kiri-sched release; kiri-sched reset  # back to normal / clear a fault
+kiri-sched hold <runtime> [min] --by NAME  # nothing evicts it until release
+kiri-sched release <runtime>          # end the holds on it (one hold per card)
+kiri-sched reset                      # clear a fault
 ```
 
 ## Network

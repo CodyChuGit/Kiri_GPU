@@ -101,8 +101,11 @@ pub type Refusal = (u16, String);
 /// What survives a restart of the scheduler (and of the box).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Saved {
+    /// The first hold, as older versions read it.
     #[serde(default)]
     pub hold: Option<Hold>,
+    #[serde(default)]
+    pub holds: Vec<Hold>,
     #[serde(default)]
     pub fenced: BTreeMap<String, u64>,
     #[serde(default)]
@@ -149,7 +152,8 @@ pub struct Core {
     inflight: BTreeMap<String, usize>,
     waiting: Vec<Waiter>,
     next_id: u64,
-    hold: Option<Hold>,
+    /// Holds, each on one runtime; together they always fit on the box.
+    holds: Vec<Hold>,
     /// Start failures (and crashes) per runtime, Unix ms.
     fails: BTreeMap<String, Vec<u64>>,
     /// No new start before this time (backoff after a failure).
@@ -184,7 +188,14 @@ impl Core {
             inflight: BTreeMap::new(),
             waiting: Vec::new(),
             next_id: 1,
-            hold: saved.hold.filter(|h| known(&h.rt)),
+            holds: if saved.holds.is_empty() {
+                saved.hold.into_iter().collect()
+            } else {
+                saved.holds
+            }
+            .into_iter()
+            .filter(|h| known(&h.rt))
+            .collect(),
             fails: BTreeMap::new(),
             backoff: BTreeMap::new(),
             fenced: saved
@@ -240,7 +251,8 @@ impl Core {
 
     pub fn saved(&self) -> Saved {
         Saved {
-            hold: self.hold.clone(),
+            hold: self.holds.first().cloned(),
+            holds: self.holds.clone(),
             fenced: self.fenced.clone(),
             last_good: self.last_good.clone(),
             cards: self
@@ -280,30 +292,46 @@ impl Core {
         self.fenced.get(rt).copied().filter(|&t| t > now)
     }
 
-    fn active_hold(&self, now: u64) -> Option<&Hold> {
-        self.hold.as_ref().filter(|h| match (h.after_ready_secs, h.until) {
+    fn hold_live(h: &Hold, now: u64) -> bool {
+        match (h.after_ready_secs, h.until) {
             (Some(_), None) => h.start_by.is_none_or(|t| t > now),
             (_, until) => until.is_none_or(|t| t > now),
-        })
+        }
+    }
+
+    fn active_holds(&self, now: u64) -> impl Iterator<Item = &Hold> {
+        self.holds.iter().filter(move |h| Core::hold_live(h, now))
+    }
+
+    /// The runtimes held right now, each once.
+    fn held(&self, now: u64) -> BTreeSet<String> {
+        self.active_holds(now).map(|h| h.rt.clone()).collect()
+    }
+
+    /// Cards the held runtimes need, beside `rt` (counted once if held).
+    fn held_cards_with(&self, rt: &str, now: u64) -> usize {
+        let mut set = self.held(now);
+        set.insert(rt.to_owned());
+        set.iter().map(|r| self.cfg.cards(r)).sum()
     }
 
     /// A `use` hold starts its clock once its runtime is ready.
     fn arm_hold(&mut self, now: u64, rt: &str) {
-        if let Some(h) = &mut self.hold
-            && h.rt == rt
-            && h.until.is_none()
-            && let Some(secs) = h.after_ready_secs.take()
-        {
-            h.until = Some(now + secs * 1000);
-            h.start_by = None;
+        for h in self.holds.iter_mut().filter(|h| h.rt == rt && h.until.is_none()) {
+            if let Some(secs) = h.after_ready_secs.take() {
+                h.until = Some(now + secs * 1000);
+                h.start_by = None;
+            }
         }
     }
 
-    /// A hold refuses only the runtimes that cannot run beside it.
+    /// Holds refuse only the runtimes that cannot run beside them: the
+    /// first hold in the way, if any.
     fn blocking_hold(&self, rt: &str, now: u64) -> Option<&Hold> {
-        self.active_hold(now).filter(|h| {
-            h.rt != rt && self.cfg.cards(&h.rt) + self.cfg.cards(rt) > self.cfg.sched.gpus
-        })
+        if self.held_cards_with(rt, now) <= self.cfg.sched.gpus {
+            return None;
+        }
+        self.active_holds(now).find(|h| h.rt != rt)
     }
 
     fn eta_secs(&self, rt: &str) -> u64 {
@@ -515,15 +543,13 @@ impl Core {
             return None;
         }
         self.fenced.retain(|_, t| *t > now);
-        let fenced = |h: &Hold| h.after_ready_secs.is_some() && self.fenced.contains_key(&h.rt);
-        if self.hold.is_some()
-            && (self.active_hold(now).is_none() || self.hold.as_ref().is_some_and(fenced))
-        {
-            self.hold = None;
-        }
+        let fenced = self.fenced.clone();
+        self.holds.retain(|h| {
+            Core::hold_live(h, now) && !(h.after_ready_secs.is_some() && fenced.contains_key(&h.rt))
+        });
         // The idle clock of each ready runtime with an idle limit starts
         // when it is first seen with nothing to do.
-        let hold = self.active_hold(now).map(|h| h.rt.clone());
+        let held = self.held(now);
         let home = self.cfg.sched.home.clone();
         let idle: Vec<String> = self
             .running
@@ -531,7 +557,7 @@ impl Core {
             .filter(|(rt, s)| {
                 s.state == SlotState::Ready
                     && **rt != home
-                    && Some(*rt) != hold.as_ref()
+                    && !held.contains(*rt)
                     && self
                         .cfg
                         .runtime(rt)
@@ -544,22 +570,23 @@ impl Core {
         for rt in idle {
             self.idle_since.entry(rt).or_insert(now);
         }
-        let (why, plan) = self.decide(now, hold.as_deref())?;
+        let (why, plan) = self.decide(now, &held)?;
         self.why = why;
         Some(plan)
     }
 
-    fn decide(&self, now: u64, hold: Option<&str>) -> Option<(&'static str, Plan)> {
-        let not_held = |rt: &str| Some(rt) != hold;
-        // 1. A hold: its runtime gets on, evicting whatever is in the way.
-        if let Some(h) = hold
-            && !self.running.contains_key(h)
-        {
-            return self
-                .startable(h, now)
-                .then(|| self.plan_for(h, &[], |rt, _| rt != h))
-                .flatten()
-                .map(|p| ("hold", p));
+    fn decide(&self, now: u64, held: &BTreeSet<String>) -> Option<(&'static str, Plan)> {
+        let not_held = |rt: &str| !held.contains(rt);
+        // 1. Holds: each held runtime gets on, evicting whatever is in the
+        // way but never another held one (the holds fit together). One
+        // that cannot start yet (backoff) waits without blocking the rest.
+        for h in held {
+            if !self.running.contains_key(h)
+                && self.startable(h, now)
+                && let Some(p) = self.plan_for(h, &[], |rt, _| not_held(rt))
+            {
+                return Some(("hold", p));
+            }
         }
         // 2. Waiting work: interactive (and agent work old enough to count as
         // interactive) first, then agent work, then batch; oldest first.
@@ -896,20 +923,60 @@ impl Core {
         if let Some(reason) = &self.fault {
             return Err((503, format!("GPU fault, nothing switches until kiri-sched reset: {reason}")));
         }
-        if let Some(h) = self.active_hold(now)
-            && h.rt != rt
-            && h.by != by
-            && !force
-        {
-            return Err((409, format!(
-                "the GPUs are held for {} by {}{}; wait, ask them to release it, or pass --force",
-                h.rt,
-                h.by,
-                h.until.map_or_else(String::new, |t| format!(" until {t}"))
-            )));
+        // A named caller has one hold: a new one replaces its own. A bare
+        // admin-socket caller is anyone on the box: it only refreshes its
+        // hold on the same runtime.
+        let named = by != "admin-socket";
+        let replaced = |h: &Hold| h.by == by && (named || h.rt == rt);
+        self.holds.retain(|h| Core::hold_live(h, now));
+        let mut others: Vec<Hold> = self.holds.iter().filter(|h| !replaced(h)).cloned().collect();
+        let fits = |others: &[Hold]| {
+            let mut set: BTreeSet<&str> = others.iter().map(|h| h.rt.as_str()).collect();
+            set.insert(rt);
+            set.iter().map(|r| self.cfg.cards(r)).sum::<usize>() <= self.cfg.sched.gpus
+        };
+        // A bare caller's earlier bare holds give way to its new one when
+        // they are in the way (`use deepseek` then `use qwen` just switches),
+        // and stay when they fit beside it.
+        while !fits(&others) {
+            match others.iter().rposition(|h| h.by == by && h.rt != rt) {
+                Some(i) => {
+                    others.remove(i);
+                }
+                None => break,
+            }
+        }
+        if !fits(&others) {
+            if !force {
+                let list: Vec<String> = others
+                    .iter()
+                    .filter(|h| h.rt != rt)
+                    .map(|h| {
+                        format!(
+                            "{} by {}{}",
+                            h.rt,
+                            h.by,
+                            h.until.map_or_else(String::new, |t| format!(" until {t}"))
+                        )
+                    })
+                    .collect();
+                return Err((409, format!(
+                    "the GPUs are held for {}; {rt} does not fit beside that; wait, ask them to release it, or pass --force",
+                    list.join(", ")
+                )));
+            }
+            // --force: drop the holds in the way, newest first, until it fits.
+            while !fits(&others) {
+                match others.iter().rposition(|h| h.rt != rt) {
+                    Some(i) => {
+                        others.remove(i);
+                    }
+                    None => break,
+                }
+            }
         }
         let s = &self.cfg.sched;
-        self.hold = Some(match hold_for {
+        let hold = match hold_for {
             HoldFor::Until(until) => Hold {
                 rt: rt.to_owned(),
                 until,
@@ -929,35 +996,40 @@ impl Core {
                         * 1000,
                 ),
             },
-        });
+        };
+        others.push(hold);
+        self.holds = others;
         if self.is_ready(rt) {
             self.arm_hold(now, rt);
         }
         Ok(())
     }
 
-    /// Ends the hold. Refused (409) unless the caller names the held
-    /// runtime, set the hold itself under a name, or passes `force`.
+    /// Ends holds: every hold on `rt` when it is named, else the named
+    /// caller's own. A bare admin-socket caller must name the runtime (or
+    /// pass `force`, which ends them all).
     pub fn release(
         &mut self,
         now: u64,
         rt: Option<&str>,
         by: &str,
         force: bool,
-    ) -> Result<Option<Hold>, Refusal> {
-        let Some(h) = self.active_hold(now) else {
-            return Ok(self.hold.take());
+    ) -> Result<Vec<Hold>, Refusal> {
+        self.holds.retain(|h| Core::hold_live(h, now));
+        let take = |h: &Hold| match rt {
+            Some(r) => h.rt == r,
+            None => force || h.by == by,
         };
-        // A bare admin-socket caller is anyone on the box: it must name the
-        // runtime. A named caller may release its own hold.
-        let own = h.by == by && by != "admin-socket";
-        if force || own || rt == Some(h.rt.as_str()) {
-            return Ok(self.hold.take());
+        if rt.is_none() && !force && by == "admin-socket" && !self.holds.is_empty() {
+            let list: Vec<String> = self.holds.iter().map(|h| format!("{} by {}", h.rt, h.by)).collect();
+            return Err((409, format!(
+                "held: {}; name the runtime (kiri-sched release <runtime>), or pass --force",
+                list.join(", ")
+            )));
         }
-        Err((409, format!(
-            "the GPUs are held for {} by {}; release {} names it (kiri-sched release {}), or pass --force",
-            h.rt, h.by, h.rt, h.rt
-        )))
+        let (gone, kept): (Vec<Hold>, Vec<Hold>) = self.holds.drain(..).partition(|h| take(h));
+        self.holds = kept;
+        Ok(gone)
     }
 
     /// The state of one runtime, as status shows it.
@@ -975,7 +1047,12 @@ impl Core {
 
     #[cfg(test)]
     pub fn hold(&self, now: u64) -> Option<&Hold> {
-        self.active_hold(now)
+        self.active_holds(now).next()
+    }
+
+    #[cfg(test)]
+    pub fn holds(&self, now: u64) -> Vec<&Hold> {
+        self.active_holds(now).collect()
     }
 
     /// The Kiri daemon asks before a container gets GPUs. The container
@@ -1137,7 +1214,8 @@ impl Core {
             "gpus": gpus,
             "switch": self.trans,
             "fault": self.fault,
-            "hold": self.active_hold(now),
+            "hold": self.active_holds(now).next(),
+            "holds": self.active_holds(now).collect::<Vec<_>>(),
             "home": self.cfg.sched.home,
             "runtimes": runtimes,
             "waiting_total": self.waiting.len(),
@@ -1447,6 +1525,101 @@ mod tests {
     }
 
     #[test]
+    fn one_card_holds_by_different_callers_share_the_box() {
+        let mut c = core();
+        switch_ok(&mut c, 0);
+        c.set_hold(0, "comfyui", HoldFor::Until(None), "admin-socket:render", false).unwrap();
+        // A second caller holds the other one-card runtime: no 409.
+        c.set_hold(0, "mocap", HoldFor::Until(None), "admin-socket:mocap-job", false).unwrap();
+        assert_eq!(c.holds(0).len(), 2);
+        let p = c.want_switch(S).unwrap();
+        assert_eq!(p.start.as_deref(), Some("comfyui"));
+        run(&mut c, S, &p);
+        let p = c.want_switch(2 * S).unwrap();
+        assert_eq!((p.start.as_deref(), p.stop.len()), (Some("mocap"), 0));
+        run(&mut c, 2 * S, &p);
+        assert!(c.is_ready("comfyui") && c.is_ready("mocap"));
+        assert_eq!(c.status(3 * S)["holds"].as_array().unwrap().len(), 2);
+        // A two-card hold cannot fit beside them: 409 naming both.
+        let e = c.set_hold(3 * S, "maya", HoldFor::Until(None), "admin-socket:x", false).unwrap_err();
+        assert_eq!(e.0, 409);
+        assert!(e.1.contains("comfyui") && e.1.contains("mocap"), "{}", e.1);
+        // Neither is ever evicted while held, even idle and asked for.
+        c.admit(4 * S, "maya", Class::Interactive);
+        assert_eq!(c.want_switch(5000 * S), None);
+        // Releasing one of them still leaves no room for maya.
+        assert_eq!(c.release(6000 * S, None, "admin-socket:mocap-job", false).unwrap().len(), 1);
+        assert_eq!(c.held(6000 * S), BTreeSet::from(["comfyui".to_string()]));
+    }
+
+    #[test]
+    fn force_drops_only_the_holds_in_the_way() {
+        let mut cfg = Config::parse(EXAMPLE).unwrap();
+        cfg.runtimes.push(crate::config::Runtime {
+            name: "splat".into(),
+            ..cfg.runtime("mocap").unwrap().clone()
+        });
+        let mut c = Core::new(Arc::new(cfg), Saved::default());
+        c.set_hold(0, "comfyui", HoldFor::Until(None), "admin-socket:a", false).unwrap();
+        c.set_hold(0, "mocap", HoldFor::Until(None), "admin-socket:b", false).unwrap();
+        // splat needs one card: both are held, so 409 without --force.
+        assert_eq!(c.set_hold(S, "splat", HoldFor::Until(None), "admin-socket:c", false).unwrap_err().0, 409);
+        // --force drops only one hold (the newest), not both.
+        c.set_hold(S, "splat", HoldFor::Until(None), "admin-socket:c", true).unwrap();
+        assert_eq!(
+            c.held(S),
+            BTreeSet::from(["comfyui".to_string(), "splat".to_string()])
+        );
+        // A two-card hold with --force drops everything in the way.
+        c.set_hold(2 * S, "maya", HoldFor::Until(None), "admin-socket:d", true).unwrap();
+        assert_eq!(c.held(2 * S), BTreeSet::from(["maya".to_string()]));
+    }
+
+    #[test]
+    fn a_caller_moving_its_own_hold_frees_its_old_card() {
+        let mut c = core();
+        c.set_hold(0, "comfyui", HoldFor::Until(None), "admin-socket:a", false).unwrap();
+        c.set_hold(0, "mocap", HoldFor::Until(None), "admin-socket:b", false).unwrap();
+        // b moves to maya: b's own mocap hold is replaced, but a's comfyui
+        // hold is still in the way, so it is refused and b keeps mocap.
+        assert_eq!(c.set_hold(S, "maya", HoldFor::Until(None), "admin-socket:b", false).unwrap_err().0, 409);
+        assert_eq!(c.holds(S).len(), 2);
+        c.release(S, None, "admin-socket:a", false).unwrap();
+        c.set_hold(2 * S, "maya", HoldFor::Until(None), "admin-socket:b", false).unwrap();
+        assert_eq!(c.held(2 * S), BTreeSet::from(["maya".to_string()]));
+    }
+
+    #[test]
+    fn bare_uses_switch_and_keep_what_fits() {
+        let mut c = core();
+        // `use comfyui` then `use mocap` with no --by: both fit, both kept.
+        c.set_hold(0, "comfyui", HoldFor::AfterReady(60), "admin-socket", false).unwrap();
+        c.set_hold(0, "mocap", HoldFor::AfterReady(60), "admin-socket", false).unwrap();
+        assert_eq!(c.holds(0).len(), 2);
+        // `use maya` (two cards) replaces the bare holds in its way.
+        c.set_hold(S, "maya", HoldFor::AfterReady(60), "admin-socket", false).unwrap();
+        assert_eq!(c.held(S), BTreeSet::from(["maya".to_string()]));
+        // But never a named caller's hold.
+        c.release(S, Some("maya"), "admin-socket", false).unwrap();
+        c.set_hold(S, "comfyui", HoldFor::Until(None), "admin-socket:render", false).unwrap();
+        assert_eq!(c.set_hold(2 * S, "maya", HoldFor::AfterReady(60), "admin-socket", false).unwrap_err().0, 409);
+    }
+
+    #[test]
+    fn several_holds_survive_a_restart() {
+        let mut c = core();
+        c.set_hold(0, "comfyui", HoldFor::Until(None), "admin-socket:a", false).unwrap();
+        c.set_hold(0, "mocap", HoldFor::Until(None), "admin-socket:b", false).unwrap();
+        let saved = c.saved();
+        let json = serde_json::to_string(&saved).unwrap();
+        // Old readers still see one hold.
+        assert!(json.contains("\"hold\":{"), "{json}");
+        let back: Saved = serde_json::from_str(&json).unwrap();
+        let c2 = Core::new(Arc::new(Config::parse(EXAMPLE).unwrap()), back);
+        assert_eq!(c2.holds(0).len(), 2);
+    }
+
+    #[test]
     fn failures_back_off_then_fence() {
         let mut c = core();
         c.admit(0, "comfyui", Class::Interactive);
@@ -1619,18 +1792,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.0, 409);
         assert!(e.1.contains("comfyui by admin-socket:lab"), "{}", e.1);
+        // A second hold on the same runtime is fine.
         assert!(c.set_hold(901 * S, "comfyui", HoldFor::AfterReady(600), "admin-socket", false).is_ok());
-        c.set_hold(901 * S, "comfyui", HoldFor::Until(Some(2000 * S)), "admin-socket:lab", false)
-            .unwrap();
-        assert!(c.set_hold(902 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).is_ok());
-        // Release: a bare caller must name the runtime; the owner need not.
+        assert_eq!(c.holds(901 * S).len(), 2);
+        // lab moving its own hold to maya is refused while the bare
+        // caller's comfyui hold remains (maya needs comfyui's card).
+        assert_eq!(c.set_hold(902 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap_err().0, 409);
+        // Release: a bare caller must name the runtime; a named one ends
+        // only its own holds.
         assert_eq!(c.release(903 * S, None, "admin-socket", false).unwrap_err().0, 409);
-        assert_eq!(c.release(903 * S, None, "admin-socket:other", false).unwrap_err().0, 409);
-        assert!(c.release(903 * S, None, "admin-socket:lab", false).unwrap().is_some());
+        assert!(c.release(903 * S, None, "admin-socket:other", false).unwrap().is_empty());
+        assert_eq!(c.release(903 * S, Some("comfyui"), "admin-socket", false).unwrap().len(), 2);
+        c.set_hold(902 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap();
+        assert!(c.release(903 * S, None, "admin-socket:lab", false).unwrap().len() == 1);
         c.set_hold(904 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap();
-        assert!(c.release(905 * S, Some("maya"), "admin-socket", false).unwrap().is_some());
+        assert!(c.release(905 * S, Some("maya"), "admin-socket", false).unwrap().len() == 1);
         c.set_hold(904 * S, "maya", HoldFor::Until(None), "admin-socket:lab", false).unwrap();
-        assert!(c.release(905 * S, None, "admin-socket", true).unwrap().is_some());
+        assert!(c.release(905 * S, None, "admin-socket", true).unwrap().len() == 1);
         // A use of a runtime that never gets ready is given up in time.
         c.set_hold(1000 * S, "mocap", HoldFor::AfterReady(60), "t", false).unwrap();
         let p = c.want_switch(1000 * S).unwrap();
@@ -1665,6 +1843,7 @@ mod tests {
             let rts = ["maya", "comfyui", "mocap"];
             let classes = [Class::Interactive, Class::Agent, Class::Batch];
             let mut both_one_card = 0;
+            let mut many_holds = 0;
             for _ in 0..2000 {
                 now += next(20) * S;
                 match next(10) {
@@ -1689,16 +1868,23 @@ mod tests {
                         }
                     }
                     5 => {
-                        if next(4) == 0 {
+                        let by = ["a", "b", "c"][next(3) as usize];
+                        if next(3) != 0 {
                             let _ = c.set_hold(
                                 now,
                                 rts[next(3) as usize],
                                 HoldFor::Until(Some(now + next(600) * S)),
-                                "t",
-                                next(2) == 0,
+                                by,
+                                next(4) == 0,
                             );
                         } else {
-                            let _ = c.release(now, None, "t", false);
+                            let _ = c.release(now, None, by, false);
+                        }
+                        // Invariant 5: the live holds always fit together.
+                        let need: usize = c.held(now).iter().map(|rt| c.cfg.cards(rt)).sum();
+                        assert!(need <= c.cfg.sched.gpus, "seed {seed}: holds overlap");
+                        if c.holds(now).len() > 1 {
+                            many_holds += 1;
                         }
                     }
                     6 => {
@@ -1709,10 +1895,10 @@ mod tests {
                         }
                     }
                     _ => {
-                        let held = c.hold(now).map(|h| h.rt.clone());
+                        let held = c.held(now);
                         if let Some(p) = c.want_switch(now) {
                             // Invariant 2: a live hold is never evicted.
-                            if let Some(h) = &held {
+                            for h in &held {
                                 assert!(!p.stop.contains(h), "seed {seed}: evicted the hold {h}");
                             }
                             if let Some(to) = &p.start {
@@ -1760,6 +1946,7 @@ mod tests {
             }
             if seed == 1 {
                 assert!(both_one_card > 0, "the random run never shared the box");
+                assert!(many_holds > 0, "the random run never held two runtimes");
             }
         }
     }
