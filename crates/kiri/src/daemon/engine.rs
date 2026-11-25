@@ -2529,14 +2529,23 @@ impl Engine {
         // GPUs go only to the runtime the GPU scheduler says holds them
         // (when this host has one): see `gpulease`.
         let gpus = super::cdi::wanted(&spec.host_opts).map(|w| super::gpulease::gpus(&w)).unwrap_or_default();
-        if let Err(reason) = super::gpulease::check(&id, &spec.labels, &gpus) {
-            let e = Error::Conflict(reason);
-            self.fail_start(&id, &spec, &e);
-            return Err(e);
-        }
+        let given = match super::gpulease::check(&id, &spec.labels, &gpus) {
+            Ok(g) => g,
+            Err(reason) => {
+                let e = Error::Conflict(reason);
+                self.fail_start(&id, &spec, &e);
+                return Err(e);
+            }
+        };
+        // A yes on other GPUs (a runtime's child limited to its cards): the
+        // container gets exactly those instead of what it asked for.
+        let device_opts = match &given {
+            Some(devices) => std::borrow::Cow::Owned(super::cdi::with_gpus(&spec.host_opts, devices)),
+            None => std::borrow::Cow::Borrowed(&spec.host_opts),
+        };
         // GPUs and other CDI devices, from the host's specs as they are now:
         // a driver update since the last start moves the libraries.
-        let (env, mounts) = match super::cdi::for_container(&spec.host_opts) {
+        let (env, mounts) = match super::cdi::for_container(&device_opts) {
             Ok(None) => (std::borrow::Cow::Borrowed(&spec.env), std::borrow::Cow::Borrowed(&spec.mounts)),
             Ok(Some(cdi)) => {
                 for hook in &cdi.skipped {

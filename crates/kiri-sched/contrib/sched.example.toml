@@ -72,6 +72,17 @@ concurrency = 1
 start_timeout_secs = 600
 home_after_idle_secs = 600
 
+# Games and a streamed desktop (Wolf, played through Moonlight). Wolf starts
+# a container per session through the Kiri socket; with `children = true`
+# those containers (labelled dev.kiri.sched.parent: gaming in Wolf's
+# base_create_json) get this runtime's card, and kiri-run@ removes them
+# when it stops.
+#[[runtime]]
+#name = "gaming"
+#upstream = "http://127.0.0.1:47989"
+#cards = 1
+#children = true
+
 # Light services: always on, restarted when they stop answering.
 [[service]]
 name = "dashboard"

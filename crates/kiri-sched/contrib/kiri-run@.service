@@ -18,6 +18,12 @@
 # needs one card names it, and Kiri refuses any other:
 #   devices: [{driver: nvidia, device_ids: ["${KIRI_SCHED_GPUS:?}"], capabilities: [gpu]}]
 # A stack that needs every card may keep `count: all`.
+#
+# A runtime with `children = true` in sched.toml (Wolf: one container per
+# game session, started through the Kiri socket) labels those containers
+# `dev.kiri.sched.parent: <stack>`; they get its lease on its cards only.
+# Compose does not know them, so every stop of this unit removes them too,
+# before the scheduler checks that the cards are free.
 [Unit]
 Description=Kiri stack %i (run by kiri-sched)
 Requires=kiri.service
@@ -38,6 +44,7 @@ ExecStart=/opt/box/bin/kiri-compose up --remove-orphans --abort-on-container-exi
 ExecStop=/opt/box/bin/kiri-compose down
 # Also after the stack ended on its own: nothing exited is left behind.
 ExecStopPost=/opt/box/bin/kiri-compose down
+ExecStopPost=-/opt/box/bin/kiri-sched-children %i
 Restart=no
 TimeoutStartSec=180
 # Bounds each runtime's stop_timeout_secs in sched.toml (keep those under it).

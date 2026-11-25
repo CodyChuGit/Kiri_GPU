@@ -6,8 +6,12 @@
 //! cannot put a second runtime on cards another one holds.
 //!
 //! The question goes over a Unix socket as one line of JSON:
-//! `{"op":"gpu-start","id":…,"labels":{…},"devices":[…]}`, and the answer
-//! is one line back, `{"ok":true}` or `{"ok":false,"reason":"…"}`.
+//! `{"op":"gpu-start","id":…,"labels":{…},"devices":[…],"narrow":true}`, and
+//! the answer is one line back, `{"ok":true}` or `{"ok":false,"reason":"…"}`.
+//! `narrow` says this daemon can start the container on other GPUs than it
+//! asked for: a yes may then carry `"devices":["nvidia.com/gpu=1"]`, and
+//! the container gets exactly those (a runtime's own child containers,
+//! such as game sessions, asking for `all` while the runtime holds one card).
 //!
 //! - No socket and no [`REQUIRED`] marker: no scheduler on this host, so
 //!   the start goes ahead as on any Kiri.
@@ -47,23 +51,24 @@ pub fn gpus(wants: &[Want]) -> Vec<String> {
         .collect()
 }
 
-/// Asks before a start; `Err` carries the refusal for the client.
-pub fn check(id: &str, labels: &Value, devices: &[String]) -> Result<(), String> {
+/// Asks before a start; `Ok(Some(devices))` is a yes on those GPUs instead
+/// of the ones asked for, `Err` carries the refusal for the client.
+pub fn check(id: &str, labels: &Value, devices: &[String]) -> Result<Option<Vec<String>>, String> {
     if devices.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     check_at(Path::new(SOCKET), Path::new(REQUIRED), id, labels, devices)
 }
 
-fn check_at(socket: &Path, required: &Path, id: &str, labels: &Value, devices: &[String]) -> Result<(), String> {
+fn check_at(socket: &Path, required: &Path, id: &str, labels: &Value, devices: &[String]) -> Result<Option<Vec<String>>, String> {
     if !socket.exists() {
         return if required.exists() {
             Err(format!("GPU start refused: the GPU scheduler is not running ({} is missing and {} requires it)", socket.display(), required.display()))
         } else {
-            Ok(())
+            Ok(None)
         };
     }
-    let request = json!({"op": "gpu-start", "id": id, "labels": labels, "devices": devices});
+    let request = json!({"op": "gpu-start", "id": id, "labels": labels, "devices": devices, "narrow": true});
     let answer = ask(socket, &request).map_err(|e| format!("GPU start refused: no answer from the GPU scheduler: {e}"))?;
     verdict(&answer)
 }
@@ -89,10 +94,17 @@ fn ask(_socket: &Path, _request: &Value) -> std::io::Result<String> {
 }
 
 /// The scheduler's answer as a start's outcome; anything unclear is a no.
-fn verdict(answer: &str) -> Result<(), String> {
-    let v: Value = serde_json::from_str(answer.trim()).map_err(|_| "GPU start refused: the GPU scheduler's answer was not understood".to_owned())?;
+fn verdict(answer: &str) -> Result<Option<Vec<String>>, String> {
+    let unclear = || "GPU start refused: the GPU scheduler's answer was not understood".to_owned();
+    let v: Value = serde_json::from_str(answer.trim()).map_err(|_| unclear())?;
     match v["ok"].as_bool() {
-        Some(true) => Ok(()),
+        Some(true) if v.get("devices").is_none_or(Value::is_null) => Ok(None),
+        Some(true) => {
+            // Only single NVIDIA GPUs by index: what a lease limits to.
+            let given: Vec<String> = v["devices"].as_array().ok_or_else(unclear)?.iter().map(|d| d.as_str().map(str::to_owned)).collect::<Option<_>>().ok_or_else(unclear)?;
+            let ok = !given.is_empty() && given.iter().all(|d| d.strip_prefix("nvidia.com/gpu=").is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())));
+            if ok { Ok(Some(given)) } else { Err(unclear()) }
+        }
         Some(false) => Err(format!("GPU start refused by the GPU scheduler: {}", v["reason"].as_str().unwrap_or("no reason given"))),
         None => Err("GPU start refused: the GPU scheduler's answer was not understood".to_owned()),
     }
@@ -111,7 +123,11 @@ mod tests {
 
     #[test]
     fn verdicts() {
-        assert!(verdict("{\"ok\":true}\n").is_ok());
+        assert_eq!(verdict("{\"ok\":true}\n"), Ok(None));
+        assert_eq!(verdict("{\"ok\":true,\"devices\":[\"nvidia.com/gpu=1\"]}"), Ok(Some(vec!["nvidia.com/gpu=1".to_owned()])));
+        for bad in ["[]", "[\"nvidia.com/gpu=all\"]", "[\"vendor.com/x=1\"]", "[1]", "\"nvidia.com/gpu=1\""] {
+            assert!(verdict(&format!("{{\"ok\":true,\"devices\":{bad}}}")).is_err(), "{bad}");
+        }
         assert!(verdict("{\"ok\":false,\"reason\":\"maya holds the GPUs\"}").unwrap_err().contains("maya holds the GPUs"));
         assert!(verdict("").is_err());
         assert!(verdict("yes").is_err());

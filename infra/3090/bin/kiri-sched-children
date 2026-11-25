@@ -1,0 +1,13 @@
+#!/bin/sh
+# Removes the containers a GPU runtime started itself (Wolf's game sessions),
+# labelled dev.kiri.sched.parent=<stack>. kiri-run@<stack> runs this after
+# every stop: Compose does not know them, and they hold the runtime's cards
+# until they are gone. Usage: kiri-sched-children <stack>
+set -eu
+export DOCKER_HOST=${DOCKER_HOST:-unix:///run/kiri/docker.sock}
+stack=${1:?usage: kiri-sched-children <stack>}
+ids=$(docker ps -aq --filter "label=dev.kiri.sched.parent=$stack")
+[ -n "$ids" ] || exit 0
+echo "kiri-sched-children: removing $(echo "$ids" | wc -l) container(s) of $stack"
+# shellcheck disable=SC2086 # one id per word
+docker rm -f $ids >/dev/null

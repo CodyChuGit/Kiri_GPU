@@ -1060,20 +1060,48 @@ impl Core {
     /// Compose project (the stack name). A runtime that holds every card may
     /// ask for them any way; one that holds some may only name its own by
     /// index (`nvidia.com/gpu=1`, Compose `device_ids: ["1"]`).
+    #[cfg(test)]
     pub fn lease_ok(&self, labels: &Value, devices: &[String]) -> Result<(), String> {
+        self.lease(labels, devices, false).map(|_| ())
+    }
+
+    /// The scheduler's answer to a GPU start. `Ok(Some(devices))` grants it
+    /// on those devices instead of the ones asked for: a child container
+    /// of a runtime (`dev.kiri.sched.parent`) asking for `all` or a count
+    /// gets the parent's cards, when the daemon said it can `narrow`.
+    pub fn lease(
+        &self,
+        labels: &Value,
+        devices: &[String],
+        narrow: bool,
+    ) -> Result<Option<Vec<String>>, String> {
         let label = |k: &str| {
             labels
                 .get(k)
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
         };
+        let parent = label("dev.kiri.sched.parent");
         let rt = match (
+            parent,
             label("dev.kiri.sched.runtime"),
             label("com.docker.compose.project"),
         ) {
-            (Some(name), _) => self.cfg.runtime(name).map(|r| r.name.clone()),
-            (None, Some(stack)) => self.cfg.runtime_for_stack(stack).map(|r| r.name.clone()),
-            (None, None) => None,
+            (Some(p), _, _) => {
+                let Some(r) = self.cfg.runtime_for_stack(p).or_else(|| self.cfg.runtime(p)) else {
+                    return Err(format!("dev.kiri.sched.parent {p:?} is not a GPU runtime in the scheduler's config"));
+                };
+                if !r.children {
+                    return Err(format!(
+                        "{} does not start GPU containers of its own (set children = true on it in sched.toml)",
+                        r.name
+                    ));
+                }
+                Some(r.name.clone())
+            }
+            (None, Some(name), _) => self.cfg.runtime(name).map(|r| r.name.clone()),
+            (None, None, Some(stack)) => self.cfg.runtime_for_stack(stack).map(|r| r.name.clone()),
+            (None, None, None) => None,
         };
         let Some(rt) = rt else {
             return Err("this container is not a GPU runtime in the scheduler's config".into());
@@ -1101,21 +1129,40 @@ impl Core {
             }
         };
         if slot.cards.len() == self.cfg.sched.gpus {
-            return Ok(());
+            return Ok(None);
         }
-        for d in devices {
-            let own = d
-                .strip_prefix("nvidia.com/gpu=")
+        let own = |d: &str| {
+            d.strip_prefix("nvidia.com/gpu=")
                 .and_then(|i| i.parse::<usize>().ok())
-                .is_some_and(|i| slot.cards.contains(&i));
-            if !own {
-                return Err(format!(
-                    "{rt} holds card {:?} only; it may not ask for {d} (use device_ids: [\"${{KIRI_SCHED_GPUS}}\"])",
-                    slot.cards
+                .is_some_and(|i| slot.cards.contains(&i))
+        };
+        if devices.iter().all(|d| own(d)) {
+            return Ok(None);
+        }
+        // A child does not know which card its parent got: `all` or a
+        // count it fits in becomes the parent's cards.
+        if parent.is_some() && narrow {
+            let mut want = 0;
+            for d in devices {
+                let n = match d.strip_prefix("nvidia.com/gpu=") {
+                    Some("all") => slot.cards.len(),
+                    Some(c) if c.starts_with("count:") => c[6..].parse::<usize>().unwrap_or(usize::MAX),
+                    _ if own(d) => 1,
+                    _ => usize::MAX,
+                };
+                want = want.max(n);
+            }
+            if want <= slot.cards.len() {
+                return Ok(Some(
+                    slot.cards[..want].iter().map(|c| format!("nvidia.com/gpu={c}")).collect(),
                 ));
             }
         }
-        Ok(())
+        let d = devices.iter().find(|d| !own(d)).map_or("", String::as_str);
+        Err(format!(
+            "{rt} holds card {:?} only; it may not ask for {d} (use device_ids: [\"${{KIRI_SCHED_GPUS}}\"])",
+            slot.cards
+        ))
     }
 
     /// One word for the box: fault, a switch's stage, idle or ready.
@@ -1734,6 +1781,42 @@ mod tests {
             c.lease_ok(&mocap, &["nvidia.com/gpu=1".into(), "nvidia.com/gpu=0".into()])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn children_inherit_the_lease_on_their_parents_cards_only() {
+        let mut c = core();
+        let child = json!({"dev.kiri.sched.parent": "mocap"});
+        let all = ["nvidia.com/gpu=all".to_owned()];
+        // Nothing holds mocap's cards: refused.
+        assert!(c.lease(&child, &all, true).is_err());
+        c.admit(0, "comfyui", Class::Interactive);
+        switch_ok(&mut c, 0);
+        c.admit(0, "mocap", Class::Interactive);
+        switch_ok(&mut c, 0);
+        let card = c.running()["mocap"].cards[0];
+        let mine = format!("nvidia.com/gpu={card}");
+        let other = format!("nvidia.com/gpu={}", 1 - card);
+        // all / count:1 become mocap's card; its own card is fine as is.
+        assert_eq!(c.lease(&child, &all, true).unwrap(), Some(vec![mine.clone()]));
+        assert_eq!(
+            c.lease(&child, &["nvidia.com/gpu=count:1".into()], true).unwrap(),
+            Some(vec![mine.clone()])
+        );
+        assert_eq!(c.lease(&child, std::slice::from_ref(&mine), true).unwrap(), None);
+        // Never the other card, more cards than it has, or a UUID.
+        for bad in [other.as_str(), "nvidia.com/gpu=count:2", "nvidia.com/gpu=GPU-1234"] {
+            assert!(c.lease(&child, &[bad.to_owned()], true).is_err(), "{bad}");
+        }
+        // A daemon that cannot narrow gets a no for `all`.
+        assert!(c.lease(&child, &all, false).is_err());
+        // Only runtimes with children = true have children.
+        let comfy_child = json!({"dev.kiri.sched.parent": "comfyui"});
+        assert!(c.lease(&comfy_child, &all, true).unwrap_err().contains("children = true"));
+        assert!(c.lease(&json!({"dev.kiri.sched.parent": "nope"}), &all, true).is_err());
+        // The parent label wins over a runtime label naming someone else.
+        let sneaky = json!({"dev.kiri.sched.parent": "mocap", "dev.kiri.sched.runtime": "comfyui"});
+        assert_eq!(c.lease(&sneaky, &all, true).unwrap(), Some(vec![mine]));
     }
 
     #[test]

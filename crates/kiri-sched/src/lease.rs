@@ -25,14 +25,25 @@ pub fn answer<H: Host>(engine: &Engine<H>, line: &str) -> Value {
         .flatten()
         .filter_map(|d| d.as_str().map(str::to_owned))
         .collect();
-    let verdict = engine.core().lease_ok(&q["labels"], &devices);
+    // A daemon that can start a container on other devices than it asked
+    // for says so; an older one only ever gets a yes or a no.
+    let narrow = q["narrow"] == true;
+    let verdict = engine.core().lease(&q["labels"], &devices, narrow);
     match verdict {
-        Ok(()) => {
+        Ok(None) => {
             audit(
                 "lease-granted",
                 json!({"container": q["id"], "devices": q["devices"]}),
             );
             json!({"ok": true})
+        }
+        Ok(Some(given)) => {
+            audit(
+                "lease-granted",
+                json!({"container": q["id"], "asked": q["devices"], "devices": given,
+                       "parent": q["labels"]["dev.kiri.sched.parent"]}),
+            );
+            json!({"ok": true, "devices": given})
         }
         Err(reason) => {
             audit(
@@ -90,5 +101,37 @@ mod tests {
         assert_eq!(answer(&e, q)["ok"], true);
         let other = q.replace("maya", "comfyui");
         assert_eq!(answer(&e, &other)["ok"], false);
+    }
+
+    #[test]
+    fn a_child_gets_its_parents_card() {
+        let e = Engine::new(
+            Arc::new(Config::parse(EXAMPLE).unwrap()),
+            Fake::default(),
+            None,
+        );
+        {
+            let mut c = e.core();
+            c.admit(0, "mocap", crate::config::Class::Interactive);
+            let p = c.want_switch(0).unwrap();
+            c.switch_begin(&p);
+            c.switch_starting();
+            c.switch_ready(0, "mocap", 0);
+        }
+        let card = e.core().status(0)["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "mocap")
+            .unwrap()["cards"][0]
+            .as_u64()
+            .unwrap();
+        let q = r#"{"op":"gpu-start","id":"s1","labels":{"dev.kiri.sched.parent":"mocap"},"devices":["nvidia.com/gpu=all"],"narrow":true}"#;
+        let a = answer(&e, q);
+        assert_eq!(a["ok"], true, "{a}");
+        assert_eq!(a["devices"], json!([format!("nvidia.com/gpu={card}")]));
+        // An older daemon that cannot narrow is refused, not given all.
+        let old = q.replace(r#","narrow":true"#, "");
+        assert_eq!(answer(&e, &old)["ok"], false);
     }
 }
