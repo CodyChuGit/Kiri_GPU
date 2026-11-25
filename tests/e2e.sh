@@ -149,6 +149,13 @@ t hostname-is-id "" $D run --rm alpine hostname
 t hostname-file "" $D run --rm alpine cat /etc/hostname
 t pid1 "1" $D run --rm alpine sh -c 'echo $$'
 t proc "PID" $D run --rm alpine ps
+# --pid host: the engine's own PID namespace, so PID 1 is its init, not the
+# container's program, and a container's leftover children go with it.
+t pid-host "not-pid1" $D run --rm --pid host alpine sh -c '[ $$ != 1 ] && echo not-pid1'
+t pid-host-sees-init "1" $D run --rm --pid host alpine sh -c 'ls -d /proc/1 >/dev/null && echo 1'
+t pid-host-inspect "host" bash -c "$D run -d --name pidhost --pid host alpine sleep 60 >/dev/null; $D inspect -f '{{.HostConfig.PidMode}}' pidhost; $D rm -f pidhost >/dev/null"
+t pid-host-orphans-killed "gone" bash -c "$D run --rm --pid host alpine sh -c 'sleep 4242 >/dev/null 2>&1 & echo started'; sleep 1; $D run --rm --pid host alpine sh -c 'pgrep -f \"sleep 424[2]\" >/dev/null && echo left || echo gone'"
+t pid-container-refused "not supported" $D run --rm --pid container:x alpine true
 t dev-null "ok" $D run --rm alpine sh -c 'echo x > /dev/null && echo ok'
 t dev-null-nonroot "ok" $D run --rm -u 1000 alpine sh -c 'echo x > /dev/null && head -c 1 /dev/urandom >/dev/null && echo ok'
 # A non-root user can reopen its own stdio by path, as php-fpm and nginx

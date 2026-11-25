@@ -163,6 +163,9 @@ struct Prepared {
     shm_size: u64,
     /// `--ipc host`: no IPC namespace of its own, and the host's /dev/shm.
     ipc_host: bool,
+    /// `--pid host`: no PID namespace of its own; /proc shows the host's
+    /// processes.
+    pid_host: bool,
     /// `--init`: PID 1 supervises the program instead of being it.
     init: bool,
     /// Ulimits, groups and device nodes from the `opts` lines.
@@ -366,7 +369,10 @@ pub fn spawn(spec: &RunSpec<'_>, paths: &Paths, net: NetCtx<'_>) -> io::Result<P
     let (parent_io, child_io) = stdio(&prepared).map_err(cleanup)?;
     let rootfs_c = sys::cstr(&rootfs).map_err(cleanup)?;
 
-    let mut flags = (libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWCGROUP) as u64 | CLONE_INTO_CGROUP;
+    let mut flags = (libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWCGROUP) as u64 | CLONE_INTO_CGROUP;
+    if !prepared.pid_host {
+        flags |= libc::CLONE_NEWPID as u64;
+    }
     if !prepared.ipc_host {
         flags |= libc::CLONE_NEWIPC as u64;
     }
@@ -729,6 +735,13 @@ fn undo_now(t: &Teardown, remove_files: bool) {
     if let Some(id) = t.base.file_name() {
         let _ = fs::remove_dir_all(PathBuf::from("/run/kiri").join(id));
     }
+    // With a PID namespace of its own, the container's processes all died
+    // with its first one. With `--pid host` nothing ends them: what the
+    // program left running (daemonized children) goes now, so the cgroup
+    // can be removed. An empty cgroup returns at once.
+    if t.cgroup.is_dir() {
+        kill_cgroup(&t.cgroup);
+    }
     remove_cgroup(&t.cgroup);
     if remove_files {
         super::roots::remove(&t.base);
@@ -908,6 +921,7 @@ fn prepare(argv: StrList<'_>, env: StrList<'_>, cwd: &str, user: &str, hostname:
         readonly_rootfs: flags & run_flags::READONLY_ROOTFS != 0,
         shm_size: 64 << 20,
         ipc_host: flags & run_flags::IPC_HOST != 0,
+        pid_host: flags & run_flags::PID_HOST != 0,
         init: flags & run_flags::INIT != 0,
         host: HostApplied::default(),
         root_ready: None,
