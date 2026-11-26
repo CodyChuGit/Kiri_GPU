@@ -391,6 +391,9 @@ pub mod run_flags {
     /// `--ipc host`: share the host's IPC namespace and its /dev/shm, as
     /// PyTorch and NCCL want for several GPUs in one container.
     pub const IPC_HOST: u32 = 1 << 17;
+    /// `--pid host`: share the host's PID namespace, so the container sees
+    /// (and its /proc shows) every process on the machine.
+    pub const PID_HOST: u32 = 1 << 18;
 }
 
 /// A container's network, as `Run` carries it.

@@ -238,6 +238,10 @@ pub struct Spec {
     /// namespace and /dev/shm; anything else is a private one, as before.
     #[serde(default)]
     pub ipc_mode: String,
+    /// `--pid` (`HostConfig.PidMode`): `host` shares the host's PID
+    /// namespace; anything else is a private one, as before.
+    #[serde(default)]
+    pub pid_mode: String,
     /// Networks beyond `network_mode` (`docker network connect`, Compose):
     /// name and aliases on it.
     #[serde(default)]
@@ -2504,6 +2508,9 @@ impl Engine {
         }
         if spec.ipc_mode == "host" {
             flags |= run_flags::IPC_HOST;
+        }
+        if spec.pid_mode == "host" {
+            flags |= run_flags::PID_HOST;
         }
         flags |= spec.security_flags();
         // Every container can reach the Mac, as with Docker Desktop and OrbStack.

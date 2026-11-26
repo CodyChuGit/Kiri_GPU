@@ -1661,6 +1661,7 @@ pub(super) fn create(req: &Request, engine: &Engine) -> Result<Value, Error> {
         shell: strings(&body["Shell"]).filter(|s| !s.is_empty()).or_else(|| strings(&image_cfg["config"]["Shell"])).unwrap_or_default(),
         init: host["Init"].as_bool(),
         ipc_mode: ipc_mode(&host["IpcMode"]).map_err(Error::BadRequest)?,
+        pid_mode: pid_mode(&host["PidMode"]).map_err(Error::BadRequest)?,
         extra_networks,
         log_config: super::logfile::LogConfig::from_host(&host["LogConfig"]).map_err(Error::BadRequest)?,
         network_mode,
@@ -1713,6 +1714,18 @@ fn ipc_mode(v: &Value) -> Result<String, String> {
         "" | "private" | "shareable" | "none" => Ok(String::new()),
         m if m.starts_with("container:") => Err(format!("ipc mode {m}: joining another container's IPC namespace is not supported")),
         m => Err(format!("invalid IPC mode: {m}")),
+    }
+}
+
+/// `--pid` as kept: `host`, or empty for a private namespace. Joining
+/// another container's (`container:<name>`) is refused rather than quietly
+/// given a private one, as with `--ipc`.
+fn pid_mode(v: &Value) -> Result<String, String> {
+    match v.as_str().unwrap_or("") {
+        "host" => Ok("host".into()),
+        "" | "private" => Ok(String::new()),
+        m if m.starts_with("container:") => Err(format!("pid mode {m}: joining another container's PID namespace is not supported")),
+        m => Err(format!("invalid PID mode: {m}")),
     }
 }
 
@@ -1945,6 +1958,7 @@ fn container_inspect(engine: &Engine, key: &str) -> Result<Value, Error> {
             v["HostConfig"]["Init"] = init.into();
         }
         v["HostConfig"]["IpcMode"] = if c.spec.ipc_mode.is_empty() { "private" } else { c.spec.ipc_mode.as_str() }.into();
+        v["HostConfig"]["PidMode"] = c.spec.pid_mode.as_str().into();
         v
     })
 }
@@ -3232,6 +3246,11 @@ mod network_option_tests {
         assert_eq!(ipc_mode(&json!("shareable")).unwrap(), "");
         assert!(ipc_mode(&json!("container:web")).is_err());
         assert!(ipc_mode(&json!("bogus")).is_err());
+        assert_eq!(pid_mode(&json!("host")).unwrap(), "host");
+        assert_eq!(pid_mode(&json!(null)).unwrap(), "");
+        assert_eq!(pid_mode(&json!("")).unwrap(), "");
+        assert!(pid_mode(&json!("container:web")).is_err());
+        assert!(pid_mode(&json!("bogus")).is_err());
         // inspect reports the bindings asked for, as Docker does.
         let b = |container_port, proto: &str, host_ip: &str, host_port| super::super::ports::Binding { container_port, proto: proto.into(), host_ip: host_ip.into(), host_port };
         let ports = [b(80, "tcp", "", 8080), b(80, "tcp", "127.0.0.1", 0), b(53, "udp", "", 5353)];
