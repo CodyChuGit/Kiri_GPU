@@ -169,6 +169,11 @@ pub struct Runtime {
     /// fewer shares the box with others that fit beside it.
     #[serde(default)]
     pub cards: usize,
+    /// It starts GPU containers of its own through the Kiri socket (Wolf's
+    /// game sessions): containers labelled `dev.kiri.sched.parent: <stack>`
+    /// get its lease while it holds cards, limited to those cards.
+    #[serde(default)]
+    pub children: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -501,6 +506,7 @@ cards = 1
 name = "mocap"
 upstream = "http://127.0.0.1:8200"
 cards = 1
+children = true
 
 [[service]]
 name = "dashboard"

@@ -51,7 +51,15 @@ anything the scheduler did not grant.
   that holds some of the cards only for its own (`nvidia.com/gpu=<index>`;
   `all`, `count:N` and UUIDs are refused), so a stray `kiri run --gpus all`
   or a container restarting itself cannot land on cards another runtime
-  holds. With `/etc/kiri/gpu-lease-required` present, Kiri
+  holds. A runtime with `children = true` (Wolf, which starts a container
+  per game session itself) lends its lease to containers labelled
+  `dev.kiri.sched.parent: <stack>`: while it holds cards they may start,
+  and one asking for `all` or `count:N` is started on the runtime's own
+  cards instead (Kiri asks with `"narrow": true` and starts it on the
+  `devices` the answer names). kiri-run@ removes them whenever the stack
+  stops (`kiri-sched-children`). They must ask through `DeviceRequests`
+  (`--gpus`, Compose `devices`, or CDI names); raw `/dev/nvidia*` device
+  nodes are not leased. With `/etc/kiri/gpu-lease-required` present, Kiri
   refuses GPU starts while the scheduler is down.
 - **Supervision.** At startup it keeps every GPU runtime that is already
   answering on cards it can keep (all of them, or the ones saved for it) and

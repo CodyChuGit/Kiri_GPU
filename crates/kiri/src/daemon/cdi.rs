@@ -75,6 +75,35 @@ pub fn is_qualified(name: &str) -> bool {
         && dev.as_bytes()[0].is_ascii_alphanumeric()
 }
 
+/// The same settings with every NVIDIA GPU request replaced by exactly
+/// `gpus` (CDI names): what the GPU scheduler granted instead of what was
+/// asked. Other devices are kept.
+pub fn with_gpus(opts: &Value, gpus: &[String]) -> Value {
+    let mut out = opts.clone();
+    let is_gpu = |id: &str| id == NVIDIA_GPU || id.starts_with(&format!("{NVIDIA_GPU}="));
+    let mut kept: Vec<Value> = Vec::new();
+    for r in opts["DeviceRequests"].as_array().into_iter().flatten() {
+        let driver = r["Driver"].as_str().unwrap_or("");
+        let gpu_caps = r["Capabilities"].as_array().into_iter().flatten().any(|set| set.as_array().into_iter().flatten().any(|c| c == "gpu"));
+        match driver {
+            "nvidia" => {}
+            "" if gpu_caps => {}
+            "cdi" => {
+                let ids: Vec<Value> = r["DeviceIDs"].as_array().into_iter().flatten().filter(|d| !d.as_str().is_some_and(is_gpu)).cloned().collect();
+                if !ids.is_empty() {
+                    let mut r = r.clone();
+                    r["DeviceIDs"] = Value::from(ids);
+                    kept.push(r);
+                }
+            }
+            _ => kept.push(r.clone()),
+        }
+    }
+    kept.push(serde_json::json!({"Driver": "cdi", "DeviceIDs": gpus, "Count": 0, "Capabilities": null, "Options": {}}));
+    out["DeviceRequests"] = Value::from(kept);
+    out
+}
+
 /// The devices a container's kept HostConfig settings ask for, or
 /// Docker's error for a request no driver takes.
 pub fn wanted(opts: &Value) -> Result<Vec<Want>, String> {
@@ -509,6 +538,12 @@ kind: nvidia.com/gpu
         // Compose: driver nvidia, count all, capabilities [gpu]
         assert_eq!(wanted(&json!({"DeviceRequests": [{"Driver": "nvidia", "Count": -1, "Capabilities": [["gpu"]]}]})).unwrap(), [Want::Gpus(-1)]);
         // docker run --device nvidia.com/gpu=all (Docker 25+ sends a cdi request)
+        // A grant on other GPUs replaces the GPU requests, keeps the rest.
+        let mixed = json!({"Ulimits": [], "DeviceRequests": [{"Driver": "", "Count": -1, "Capabilities": [["gpu"]]}, {"Driver": "cdi", "DeviceIDs": ["nvidia.com/gpu=all", "vendor.com/fpga=0"]}]});
+        let narrowed = with_gpus(&mixed, &["nvidia.com/gpu=1".to_owned()]);
+        assert_eq!(wanted(&narrowed).unwrap(), [Want::Named("vendor.com/fpga=0".into()), Want::Named("nvidia.com/gpu=1".into())]);
+        assert_eq!(narrowed["Ulimits"], json!([]));
+        assert_eq!(wanted(&with_gpus(&json!({}), &["nvidia.com/gpu=0".to_owned()])).unwrap(), [Want::Named("nvidia.com/gpu=0".into())]);
         let cdi = json!({"DeviceRequests": [{"Driver": "cdi", "DeviceIDs": ["nvidia.com/gpu=all"]}]});
         assert_eq!(wanted(&cdi).unwrap(), [Want::Named("nvidia.com/gpu=all".into())]);
         // …or an older client, as a device.

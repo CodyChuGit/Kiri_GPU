@@ -124,7 +124,7 @@ if [ -n "${INSTALLED:-}" ]; then systemctl try-restart kiri-sched.service 2>/dev
 say "4. box-probe, kiri-compose, gpu-raw.sh -> /opt/box/bin"
 as_admin "cd '$here/tools/box-probe' && cargo build --release --locked --target x86_64-unknown-linux-musl"
 install -D -m755 "$here/tools/box-probe/target/x86_64-unknown-linux-musl/release/box-probe" /opt/box/bin/box-probe
-install -m755 "$here/bin/kiri-compose" "$here/bin/gpu-raw.sh" /opt/box/bin/
+install -m755 "$here/bin/kiri-compose" "$here/bin/gpu-raw.sh" "$here/bin/kiri-sched-children" /opt/box/bin/
 printf '%s\n' 'export PATH=$PATH:/opt/box/bin' 'export DOCKER_HOST=unix:///run/kiri/docker.sock' > /etc/profile.d/box-kiri.sh
 /opt/box/bin/box-probe 2>&1 | head -1 || true
 
